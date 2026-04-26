@@ -1,8 +1,57 @@
 import { ref, watch } from 'vue'
 import { defineStore } from 'pinia'
 import http from "../router/axios";
+import router from "../router";
+import { useAuthStore } from "./authStore";
+import { useContentStore } from "./contentStore";
+import { useMapStore } from "./mapStore";
+
+const AGENT_TOOLS = [
+	{
+		type: "function",
+		function: {
+			name: "get_component_facts",
+			description: "Get structured facts and chart preview of one component by id or index.",
+			parameters: {
+				type: "object",
+				properties: {
+					component_id: { type: "integer", description: "Component ID" },
+					component_index: { type: "string", description: "Component index" },
+					city: { type: "string", description: "taipei or metrotaipei" },
+					include_chart: { type: "boolean", description: "Include chart preview data" },
+				},
+			},
+		},
+	},
+	{
+		type: "function",
+		function: {
+			name: "get_dashboard_component_summary",
+			description: "Summarize multiple components in one dashboard.",
+			parameters: {
+				type: "object",
+				properties: {
+					dashboard_index: { type: "string", description: "Dashboard index" },
+					city: { type: "string", description: "taipei or metrotaipei" },
+					max_components: { type: "integer", description: "Max components in summary, up to 10" },
+				},
+				required: ["dashboard_index"],
+			},
+		},
+	},
+];
+
+const ALLOWED_UI_ACTIONS = {
+	navigate_dashboard: true,
+	open_component_info: true,
+	switch_city: true,
+};
 
 export const useChatStore = defineStore('chat', () => {
+	const authStore = useAuthStore();
+	const contentStore = useContentStore();
+	const mapStore = useMapStore();
+
   	// 預設訊息
   	const defaultChatData = [
     	{
@@ -40,52 +89,200 @@ export const useChatStore = defineStore('chat', () => {
   	const addQueryData = async (newChatData) => {
 
     	chatData.value.push({ id: chatData.value.length + 1, isDefault: false, ...newChatData });
+		const aiResponse = await askAgent(newChatData.content);
+		if (aiResponse) {
+			const actionResults = await executeUIActions(aiResponse.ui_actions);
+			chatData.value.push({
+				id: chatData.value.length + 1,
+				role: 'bot',
+				isDefault: false,
+				content: aiResponse.reply || aiResponse.raw,
+			});
+			if (actionResults.length > 0) {
+				chatData.value.push({
+					id: chatData.value.length + 1,
+					role: 'bot',
+					isDefault: false,
+					content: `已執行操作：\n- ${actionResults.join("\n- ")}`,
+				});
+			}
+			saveChatLog(newChatData.content, {
+				reply: aiResponse.reply || aiResponse.raw,
+				ui_actions: aiResponse.ui_actions,
+				action_results: actionResults,
+			});
+			return;
+		}
 
+		await runVectorRecommendation(newChatData.content);
+  	};
+
+	const buildUIContext = () => ({
+		current_path: authStore.currentPath,
+		current_dashboard: {
+			index: contentStore.currentDashboard?.index || "",
+			name: contentStore.currentDashboard?.name || "",
+			city: contentStore.currentDashboard?.city || "",
+			mode: contentStore.currentDashboard?.mode || "",
+			component_count: contentStore.currentDashboard?.components?.length || 0,
+		},
+		map_context: {
+			visible_layers: mapStore.currentVisibleLayers || [],
+			user_location: mapStore.userLocation || null,
+		},
+	});
+
+	const askAgent = async (question) => {
+		try {
+			const uiContext = buildUIContext();
+			const storedSession = sessionStorage.getItem("agentSessionId");
+			const response = await http.post("/ai/chat/twai", {
+				session: storedSession || "",
+				stream: false,
+				messages: [
+					{
+						role: "system",
+						content: `你是臺北城市儀表板 agent。請優先使用工具回覆資料型問題，引用工具結果，不要臆測。
+你可建議 UI 操作，但只能使用以下 action type：navigate_dashboard、open_component_info、switch_city。
+請以 JSON 回覆，格式必須是：{"reply":"文字回覆","ui_actions":[{"type":"action_type","params":{...}}]}。
+若不需要操作，ui_actions 請回傳空陣列。
+以下是目前前端介面狀態：${JSON.stringify(uiContext)}`,
+					},
+					{
+						role: "user",
+						content: question,
+					},
+				],
+				tools: AGENT_TOOLS,
+				tool_choice: "auto",
+			});
+
+			if (response.data?.data?.session) {
+				sessionStorage.setItem("agentSessionId", response.data.data.session);
+			}
+			return parseAgentPayload(response.data?.data?.content || "");
+		} catch (error) {
+			console.error("AgentChatError :", error);
+			return null;
+		}
+	};
+
+	const parseAgentPayload = (rawContent) => {
+		if (!rawContent) return null;
+		const content = rawContent
+			.trim()
+			.replace(/^```json\s*/i, "")
+			.replace(/```$/, "")
+			.trim();
+		try {
+			const parsed = JSON.parse(content);
+			return {
+				reply: parsed.reply || "",
+				ui_actions: Array.isArray(parsed.ui_actions) ? parsed.ui_actions : [],
+				raw: rawContent,
+			};
+		} catch (error) {
+			return {
+				reply: rawContent,
+				ui_actions: [],
+				raw: rawContent,
+			};
+		}
+	};
+
+	const executeUIActions = async (actions) => {
+		if (!Array.isArray(actions) || actions.length === 0) return [];
+
+		const results = [];
+		for (const action of actions) {
+			if (!action?.type || !ALLOWED_UI_ACTIONS[action.type]) {
+				results.push(`忽略未授權操作：${action?.type || "unknown"}`);
+				continue;
+			}
+
+			try {
+				if (action.type === "navigate_dashboard") {
+					const index = action.params?.index || contentStore.currentDashboard?.index;
+					const city = action.params?.city || contentStore.currentDashboard?.city || "taipei";
+					const mode = action.params?.mode === "mapview" ? "mapview" : "dashboard";
+					if (!index) {
+						results.push("navigate_dashboard 失敗：缺少 index");
+						continue;
+					}
+					await router.push({ path: `/${mode}`, query: { index, city } });
+					results.push(`已切換到 ${mode}，儀表板 ${index} (${city})`);
+					continue;
+				}
+
+				if (action.type === "open_component_info") {
+					const componentIndex = action.params?.component_index;
+					const city = action.params?.city || contentStore.currentDashboard?.city || "taipei";
+					if (!componentIndex) {
+						results.push("open_component_info 失敗：缺少 component_index");
+						continue;
+					}
+					await router.push({ path: `/component/${componentIndex}`, query: { city } });
+					results.push(`已開啟組件 ${componentIndex} (${city})`);
+					continue;
+				}
+
+				if (action.type === "switch_city") {
+					const city = action.params?.city;
+					const index = action.params?.index || contentStore.currentDashboard?.index;
+					const mode = contentStore.currentDashboard?.mode?.includes("mapview") ? "mapview" : "dashboard";
+					if (!city || !index) {
+						results.push("switch_city 失敗：缺少 city 或 index");
+						continue;
+					}
+					await router.push({ path: `/${mode}`, query: { index, city } });
+					results.push(`已切換城市到 ${city}`);
+				}
+			} catch (error) {
+				results.push(`${action.type} 執行失敗：${error?.message || "unknown error"}`);
+			}
+		}
+
+		return results;
+	};
+
+	const runVectorRecommendation = async (question) => {
 		recommendComponents.value = [];
 		let topK = null;
 
 		try {
 			const response = await http.post(
-  				"/vector/component",
-  				new URLSearchParams({
-    				query: newChatData.content,
-    				limit: 10,
-    				score: 0.8,
-  				}),
-  				{
-    				headers: {
-      					"Content-Type": "application/x-www-form-urlencoded",
-    				},
-  				}
+				"/vector/component",
+				new URLSearchParams({
+					query: question,
+					limit: 10,
+					score: 0.8,
+				}),
+				{
+					headers: {
+						"Content-Type": "application/x-www-form-urlencoded",
+					},
+				}
 			);
 			if (response.data?.data?.length > 0) {
 				recommendComponents.value = response.data.data;
 			}
 
-			// 去除重複項目存到 result
 			const result = Array.from(
-  				recommendComponents.value.reduce((map, item) => {
-    				const key = item.index
-    				const exist = map.get(key)
-
-    				// 如果還沒放過，直接放
-    				if (!exist) {
-      					map.set(key, item)
-      					return map
-    				}
-
-    				// 如果已存在，但現在的是 metrotaipei，就覆蓋
-    				if (item.city === 'metrotaipei') {
-      					map.set(key, item)
-    				}
-
-    				return map
-  				}, new Map()).values()
+				recommendComponents.value.reduce((map, item) => {
+					const key = item.index
+					const exist = map.get(key)
+					if (!exist) {
+						map.set(key, item)
+						return map
+					}
+					if (item.city === 'metrotaipei') {
+						map.set(key, item)
+					}
+					return map
+				}, new Map()).values()
 			)
-			// 把 result 蓋回去 recommendComponents
 			recommendComponents.value = result
-
-		} catch (error) { 
+		} catch (error) {
 			console.error("VectorAnalysisError :", error);
 		}
 
@@ -97,9 +294,8 @@ export const useChatStore = defineStore('chat', () => {
 			chatData.value.push({ id: chatData.value.length + 1, role: 'bot', isDefault: false, content: `很抱歉，您提供的描述沒有相似組件，請繼續提問 ! ` });
 		}
 
-		// 分析結束後紀錄問答log
-		saveChatLog(newChatData.content, recommendComponents.value);
-  	};
+		saveChatLog(question, recommendComponents.value);
+	};
 
 	const saveChatLog = async(question, answer) => {
 		try {
