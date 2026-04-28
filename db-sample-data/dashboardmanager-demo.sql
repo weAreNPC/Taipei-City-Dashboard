@@ -31,6 +31,8 @@ aging_kpi	{#F65658,#F49F36,#F5C860,#9AC17C,#4CB495,#569C9A,#60819C,#2F8AB1}	{Tex
 aging_workforce_trend	{#24B0DD,#56B96D,#F8CF58,#F5AD4A,#E170A6,#ED6A45,#AF4137,#10294A}	{BarPercentChart,RadarChart,ColumnChart}	%
 bike_network	{#a0b8e8,#b7ff98}	{DonutChart,BarChart}	公里
 bike_map	{#a0b8e8,#b7ff98}	{MapLegend}	條
+elderly_population_ratio	{#E87B51,#F4A261,#E9C46A,#2A9D8F,#264653,#F77F00,#D62828,#023E8A,#48CAE4,#74B72E,#9B5DE5,#00B4D8}	{BarChart}	%
+age_population_trend	{#56B96D,#24B0DD,#F4A261}	{TimelineSeparateChart}	%
 \.
 
 
@@ -59,6 +61,8 @@ COPY public.components (id, index, name) FROM stdin;
 218	aging_kpi	長照指標
 215	aging_workforce_trend	高齡就業人口之年增結構
 217	bike_map	自行車道路網圖資
+1	elderly_population_ratio	各行政區老年人口比例
+2	age_population_trend	三大年齡層比例趨勢
 \.
 
 
@@ -83,6 +87,10 @@ COPY public.dashboards (id, index, name, components, icon, updated_at, created_a
 358	practical_transportation_newtpe	務實交通	{60,212,213}	directions_car	2025-03-12 08:00:38.75842+00	2024-03-21 09:38:37.66+00
 1	09a25cd9cb7d	收藏組件	\N	favorite	2025-03-14 07:34:22.247753+00	2025-03-14 07:34:22.247753+00
 2	3245d9eace5f	我的新儀表板	{215,218,216,213,212,214,60,146}	star	2025-03-14 14:55:11.732116+00	2025-03-14 14:55:11.732116+00
+361	population_aging_taipei	人口老齡化分析	{1}	elderly	2026-04-28 11:17:42.744534+00	2026-04-28 11:17:42.744534+00
+362	population_aging_metrotaipei	人口老齡化分析	{1}	elderly	2026-04-28 11:24:47.886826+00	2026-04-28 11:24:47.886826+00
+363	age_trend_taipei	人口結構趨勢	{2}	analytics	2026-04-28 11:38:45.345638+00	2026-04-28 11:38:45.345638+00
+364	age_trend_metrotaipei	人口結構趨勢	{2}	analytics	2026-04-28 11:38:45.345638+00	2026-04-28 11:38:45.345638+00
 \.
 
 
@@ -122,6 +130,10 @@ ebus_percent	\N	\N	\N	static	\N	\N	\N	交通局	顯示雙北電動公車比例	�
 ebus_percent	\N	\N	\N	static	\N	\N	\N	交通局	顯示臺北電動公車比例	此圖顯示臺北市電動公車的比例，呈現全市公車車隊中電動車所占比重，以及近年來電動公車數量的成長情形。圖表比較傳統燃油公車與電動公車的比例變化，並標示臺北市政府推動電動化政策、補助措施及其帶來的環保效益。透過這些數據，可評估臺北市電動公車的普及程度，及其在減碳與空氣品質改善上的貢獻，有助於進一步規劃更完善的公共運輸電動化策略，推動城市交通朝向低碳永續目標邁進。	可用於評估臺北市公共運輸電動化的進程，透過此圖顯示電動公車在市區公車總數中的占比及其成長趨勢。圖表呈現傳統燃油公車與電動公車的比例變化，並標示臺北市政府推動的政策措施、補助方案及相關環保效益等影響因素。透過這些數據，可分析臺北市電動公車的普及程度及其在減碳排放與空氣品質改善方面的貢獻，有助於進一步規劃更完善的公共運輸電動化策略，推動臺北朝向低碳與永續發展的城市目標邁進。	{https://tdx.transportdata.tw/api/basic/v2/Bus/Vehicle/City/Taipei?%24top=30&%24format=JSON}	{doit}	2025-02-15 05:56:00+00	2025-02-20 09:11:21.620625+00	percent	select '電動公車數量' as x_axis,y_axis,sum(data) data from \r\n(\r\nselect '電動巴士' as y_axis,count(*) as  data\r\nfrom public.bus_info_tpe\r\nwhere plate_numb like 'E%'\r\nunion all\r\nselect '非電動巴士' as y_axis,count(*) as  data\r\nfrom public.bus_info_tpe)d\r\ngroup by \r\ny_axis	\N	taipei
 youbike_availability	\N	{99}	\N	current	\N	10	minute	交通局	顯示當前雙北共享單車YouBike的使用情況。	顯示雙北地區（臺北市與新北市）當前共享單車 YouBike 的使用情況，格式為可借車輛數／全區車位數。資料來源為兩市交通局公開資料，每5分鐘更新一次，提供即時的車輛可用資訊與站點使用狀況，有助於掌握整體運行效率與民眾使用情形，亦可作為交通管理與營運調度的參考依據。	藉由顯示雙北地區 YouBike 的使用情況，以及觀察可借車輛數約為車柱總數的一半，可大致掌握目前停放於站點與使用中車輛的整體分布情形。使用者亦可透過地圖模式查詢雙北各站點的即時資訊，包括可借車輛數、可還空位數及站點位置，方便規劃路線與掌握使用狀況，提升共享單車的便利性與使用效率。	{https://tdx.transportdata.tw/api-service/swagger/basic/2cc9b888-a592-496f-99de-9ab35b7fb70d#/Bike/BikeApi_Availability_2181,https://tdx.transportdata.tw/api/basic/v2/Bike/Availability/City/NewTaipei?%24top=30&%24format=JSON}	{doit,ntpc}	2023-12-20 05:56:00+00	2024-03-19 06:08:17.99+00	percent	select x_axis,y_axis,sum(data)data\r\nfrom (select '在站車輛' as x_axis, \r\nunnest(ARRAY['可借車輛', '空位']) as y_axis, \r\nunnest(ARRAY[SUM(available_rent_general_bikes), SUM(available_return_bikes)]) as data\r\nfrom tran_ubike_realtime_new_tpe\r\nunion all \r\nselect '在站車輛' as x_axis, \r\nunnest(ARRAY['可借車輛', '空位']) as y_axis, \r\nunnest(ARRAY[SUM(available_rent_general_bikes), SUM(available_return_bikes)]) as data\r\nfrom tran_ubike_realtime)d\r\ngroup by x_axis,y_axis	\N	metrotaipei
 youbike_availability	\N	{70}	\N	current	\N	10	minute	交通局	顯示當前臺北市共享單車YouBike的使用情況。	顯示臺北市當前共享單車 YouBike 的使用情況，格式為可借車輛數／全市車位數。資料來源為臺北市政府交通局公開資料，每5分鐘更新一次，反映即時的使用狀況與車輛調度情形，可作為交通監測與市民使用參考依據。	藉由臺北市 YouBike 使用情況的顯示，以及全市可借車輛數約為車柱總數的一半，可大致掌握目前停放於站點與正在使用中的車輛數量。使用者可透過地圖模式查詢臺北市各站點的即時資訊，包括可借車輛數、可還空位數及站點位置，方便即時掌握使用狀況，提升共享單車的使用效率與便利性。	{https://tdx.transportdata.tw/api-service/swagger/basic/2cc9b888-a592-496f-99de-9ab35b7fb70d#/Bike/BikeApi_Availability_2181}	{doit}	2023-12-20 05:56:00+00	2024-03-19 06:08:17.99+00	percent	select '在站車輛' as x_axis, \r\nunnest(ARRAY['可借車輛', '空位']) as y_axis, \r\nunnest(ARRAY[SUM(available_rent_general_bikes), SUM(available_return_bikes)]) as data\r\nfrom tran_ubike_realtime	\N	taipei
+elderly_population_ratio	\N	{}	\N	static	\N	1	year	臺北市政府民政局	臺北市各行政區65歲以上人口比例	統計臺北市12個行政區中，65歲以上人口佔各行政區總人口的百分比，反映各區老齡化程度。資料來源：臺北市政府民政局人口統計。	可用於觀察臺北市各行政區老齡化程度差異，協助制定長照資源分配與社福政策。	{https://data.taipei/}	{doit}	2026-04-28 11:17:42.744534+00	2026-04-28 11:17:42.744534+00	two_d	SELECT 區域別 as x_axis, ROUND(percent25::numeric, 2) as data FROM city_age_distribution_taipei WHERE 年份 = (SELECT MAX(年份) FROM city_age_distribution_taipei) AND 統計類型 = '計' AND 區域別 != '總計' ORDER BY data DESC	\N	taipei
+age_population_trend	\N	\N	\N	static	\N	1	year	臺北市政府主計處	臺北市0-14歲、15-64歲、65歲以上人口占比長期趨勢	呈現臺北市三大年齡層（幼年0-14歲、壯年15-64歲、老年65歲以上）佔總人口比例的長期歷史趨勢。資料涵蓋數十年紀錄，清楚反映幼年人口持續下降、老年人口穩定攀升的人口結構轉變歷程。	可用於觀察臺北市人口老齡化速度與幼年人口萎縮趨勢，協助教育、醫療、長照等公共資源的長期規劃與政策制定。	{https://data.taipei/dataset/detail?id=aafb15dc-5508-4091-bd48-a708e60f6698}	{doit}	2026-04-28 11:38:45.345638+00	2026-04-28 11:38:45.345638+00	time	SELECT TO_TIMESTAMP(CONCAT(end_of_year, '-01-01'), 'YYYY-MM-DD') AT TIME ZONE 'Asia/Taipei' AS x_axis, '0-14歲(%)' AS y_axis, young_population_percentage AS data FROM dependency_ratio_and_aging_index_tpe UNION ALL SELECT TO_TIMESTAMP(CONCAT(end_of_year, '-01-01'), 'YYYY-MM-DD') AT TIME ZONE 'Asia/Taipei', '15-64歲(%)', working_age_population_percentage FROM dependency_ratio_and_aging_index_tpe UNION ALL SELECT TO_TIMESTAMP(CONCAT(end_of_year, '-01-01'), 'YYYY-MM-DD') AT TIME ZONE 'Asia/Taipei', '65歲以上(%)', elderly_population_percentage FROM dependency_ratio_and_aging_index_tpe ORDER BY x_axis	\N	taipei
+elderly_population_ratio	\N	{}	\N	static	\N	1	year	臺北市政府民政局、新北市政府民政局	雙北各行政區65歲以上人口比例	統計臺北市及新北市各行政區中，65歲以上人口佔各行政區總人口的百分比，反映各區老齡化程度。資料來源：臺北市政府民政局、新北市政府民政局人口統計。	可用於比較雙北各行政區老齡化程度差異，協助跨域制定長照資源分配與社福政策。	{https://data.taipei/,https://data.ntpc.gov.tw/}	{doit,ntpc}	2026-04-28 11:24:47.886826+00	2026-04-28 11:24:47.886826+00	two_d	SELECT 區域別 as x_axis, ROUND(percent25::numeric, 2) as data FROM city_age_distribution_taipei WHERE 年份 = (SELECT MAX(年份) FROM city_age_distribution_taipei) AND 統計類型 = '計' AND 區域別 != '總計' UNION ALL SELECT 區域別 as x_axis, ROUND(percent25::numeric, 2) as data FROM city_age_distribution_newtaipei WHERE 年份 = (SELECT MAX(年份) FROM city_age_distribution_newtaipei) AND 統計類型 = '計' AND 區域別 != '新北市' ORDER BY data DESC	\N	metrotaipei
+age_population_trend	\N	\N	\N	static	\N	1	year	臺北市政府主計處、新北市政府主計處	雙北0-14歲、15-64歲、65歲以上人口占比長期趨勢	呈現臺北市與新北市三大年齡層（幼年0-14歲、壯年15-64歲、老年65歲以上）佔總人口比例的長期歷史趨勢平均值。資料涵蓋數十年紀錄，清楚反映幼年人口持續下降、老年人口穩定攀升的人口結構轉變歷程。	可用於比較雙北地區人口老齡化速度與幼年人口萎縮趨勢，協助教育、醫療、長照等公共資源的長期規劃與跨域政策制定。	{https://data.taipei/dataset/detail?id=aafb15dc-5508-4091-bd48-a708e60f6698,https://data.ntpc.gov.tw/datasets/8308ab58-62d1-424e-8314-24b65b7ab492}	{doit,ntpc}	2026-04-28 11:38:45.345638+00	2026-04-28 11:38:45.345638+00	time	SELECT TO_TIMESTAMP(CONCAT(d.end_of_year, '-01-01'), 'YYYY-MM-DD') AT TIME ZONE 'Asia/Taipei' AS x_axis, '0-14歲(%)' AS y_axis, ROUND(AVG(d.young_population_percentage)::numeric,2) AS data FROM (SELECT end_of_year, young_population_percentage FROM dependency_ratio_and_aging_index_tpe UNION ALL SELECT end_of_year, young_population_percentage FROM dependency_ratio_and_aging_index_new_tpe) d GROUP BY d.end_of_year UNION ALL SELECT TO_TIMESTAMP(CONCAT(d.end_of_year, '-01-01'), 'YYYY-MM-DD') AT TIME ZONE 'Asia/Taipei', '15-64歲(%)', ROUND(AVG(d.working_age_population_percentage)::numeric,2) FROM (SELECT end_of_year, working_age_population_percentage FROM dependency_ratio_and_aging_index_tpe UNION ALL SELECT end_of_year, working_age_population_percentage FROM dependency_ratio_and_aging_index_new_tpe) d GROUP BY d.end_of_year UNION ALL SELECT TO_TIMESTAMP(CONCAT(d.end_of_year, '-01-01'), 'YYYY-MM-DD') AT TIME ZONE 'Asia/Taipei', '65歲以上(%)', ROUND(AVG(d.elderly_population_percentage)::numeric,2) FROM (SELECT end_of_year, elderly_population_percentage FROM dependency_ratio_and_aging_index_tpe UNION ALL SELECT end_of_year, elderly_population_percentage FROM dependency_ratio_and_aging_index_new_tpe) d GROUP BY d.end_of_year ORDER BY x_axis	\N	metrotaipei
 \.
 
 
@@ -131,6 +143,14 @@ COPY public.dashboard_groups (dashboard_id, group_id) FROM stdin;
 355	3
 359	3
 358	3
+361	1
+361	2
+362	1
+362	3
+363	1
+363	2
+364	1
+364	3
 \.
 
 --

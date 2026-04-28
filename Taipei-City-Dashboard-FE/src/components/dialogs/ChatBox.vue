@@ -1,6 +1,7 @@
 <script setup>
 import { ref, watch, nextTick } from "vue";
 import { storeToRefs } from "pinia";
+import { useRouter } from "vue-router";
 import SendIcon from "../icons/SendIcon.vue";
 import BotLogo from "../icons/BotLogo.vue";
 import UserLogo from "../icons/UserLogo.vue";
@@ -10,6 +11,7 @@ import { useContentStore } from "../../store/contentStore";
 import { useAuthStore } from "../../store/authStore";
 import http from "../../router/axios";
 
+const router = useRouter();
 const chatStore = useChatStore();
 const contentStore = useContentStore();
 const authStore = useAuthStore();
@@ -166,7 +168,14 @@ watch(
                           : "雙北"
                       }}
                     </td>
-                    <td>{{ item.name }}</td>
+                    <td>
+                      <button
+                        v-if="item.dashboard_index"
+                        class="component-dashboard-link"
+                        @click="router.push({ path: '/dashboard', query: { index: item.dashboard_index, city: item.dashboard_city } })"
+                      >{{ item.name }}</button>
+                      <span v-else>{{ item.name }}</span>
+                    </td>
                     <td>{{ item.score }}</td>
                   </tr>
                 </tbody>
@@ -383,6 +392,21 @@ $radius-20: 20px;
 
 						.relation-table td {
 							height: 2.5rem;
+
+							.component-dashboard-link {
+								background: none;
+								border: none;
+								padding: 0;
+								color: #7eb8f7;
+								text-decoration: underline;
+								cursor: pointer;
+								font-size: inherit;
+								text-align: left;
+
+								&:hover {
+									color: #aad4ff;
+								}
+							}
 						}
 
 						.relation-table th {

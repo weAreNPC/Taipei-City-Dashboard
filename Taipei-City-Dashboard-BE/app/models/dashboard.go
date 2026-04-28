@@ -331,3 +331,45 @@ func DeleteDashboard(index string, groups []int) (err error) {
 	tx.Commit()
 	return nil
 }
+
+/* ----- RAG: Component-to-Dashboard Mapping ----- */
+
+type ComponentDashboard struct {
+	ComponentID    int64  `gorm:"column:component_id"`
+	DashboardIndex string `gorm:"column:dashboard_index"`
+	DashboardCity  string `gorm:"column:dashboard_city"`
+}
+
+// GetDashboardByComponentIDs maps each component ID to the first public dashboard that contains it.
+// Prefers 'taipei'/'metrotaipei' groups over the generic 'public' group for the city value.
+func GetDashboardByComponentIDs(componentIDs []int64) (map[int64]ComponentDashboard, error) {
+	var rows []ComponentDashboard
+	result := make(map[int64]ComponentDashboard)
+	if len(componentIDs) == 0 {
+		return result, nil
+	}
+	err := DBManager.Raw(`
+		SELECT DISTINCT ON (comp_id)
+			comp_id::bigint AS component_id,
+			d.index AS dashboard_index,
+			COALESCE(
+				(SELECT g2.name
+				 FROM groups g2
+				 JOIN dashboard_groups dg2 ON g2.id = dg2.group_id
+				 WHERE dg2.dashboard_id = d.id
+				   AND g2.name IN ('taipei', 'metrotaipei')
+				   AND g2.is_personal = false
+				 LIMIT 1),
+				'taipei'
+			) AS dashboard_city
+		FROM unnest(?::int[]) AS comp_id
+		JOIN dashboards d ON comp_id = ANY(d.components)
+		JOIN dashboard_groups dg ON d.id = dg.dashboard_id
+		JOIN groups g ON dg.group_id = g.id AND g.is_personal = false
+		ORDER BY comp_id, d.id
+	`, pq.Array(componentIDs)).Scan(&rows).Error
+	for _, r := range rows {
+		result[r.ComponentID] = r
+	}
+	return result, err
+}

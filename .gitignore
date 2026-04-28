@@ -2,7 +2,7 @@
 /node_modules
 Taipei-City-Dashboard-FE/dist
 Taipei-City-Dashboard-BE/TaipeiCityDashboardBE
-
+.claude
 # Log files
 npm-debug.log*
 yarn-debug.log*
