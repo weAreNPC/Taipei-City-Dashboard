@@ -19,6 +19,7 @@ func init() {
 	Register("get_population_summary", GetPopulationSummary)
 	Register("get_component_facts", GetComponentFacts)
 	Register("get_dashboard_component_summary", GetDashboardComponentSummary)
+	Register("get_nearby_ubike_summary", GetNearbyUbikeSummary)
 }
 
 // Register adds a tool to the registry
@@ -33,6 +34,12 @@ func Execute(ctx context.Context, name string, args string) (string, error) {
 		return "", fmt.Errorf("tool %s not found", name)
 	}
 	return fn(ctx, args)
+}
+
+// Exists reports whether a tool is registered.
+func Exists(name string) bool {
+	_, ok := registry[name]
+	return ok
 }
 
 // PopulationArgs defines the arguments for the get_population_summary tool

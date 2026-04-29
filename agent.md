@@ -1,100 +1,86 @@
-# Agent 整合與擴充指南
-本文件記錄本次將 chatbot 升級為可呼叫工具、可受控操作介面的 Agent 化改動，並提供未來新增組件時的接入方式。
-## 1. 本次修改清單
-### 1.1 後端
-- 新增：`Taipei-City-Dashboard-BE/app/services/ai/tools/component_tools.go`
-  - `get_component_facts`
-    - 依 `component_id` 或 `component_index` 取得組件結構化資訊
-    - 可附帶 `chart_preview`（重用既有 query/data 函式）
-  - `get_dashboard_component_summary`
-    - 依 `dashboard_index` 取得多組件摘要（可設定 `max_components`）
-- 修改：`Taipei-City-Dashboard-BE/app/services/ai/tools/registry.go`
-  - 註冊新工具：
-    - `get_component_facts`
-    - `get_dashboard_component_summary`
-### 1.2 前端
-- 修改：`Taipei-City-Dashboard-FE/src/store/chatStore.js`
-  - 新增 Agent tools schema（前端傳給 `/ai/chat/twai`）
-  - 新增 UI context 打包（目前頁面、dashboard、地圖狀態）
-  - 對話流程改為：
-    1. 優先呼叫 Agent API `/ai/chat/twai`
-    2. 失敗時 fallback 至既有 `/vector/component`
-  - 新增 Phase 2 受控 UI 操作：
-    - 白名單 action type
-    - action 解析與執行
-    - 執行結果回饋到聊天訊息
-## 2. 目前已具備能力
-## 2.1 Agent 資訊能力
-- 可用工具回答單一組件資訊：
-  - 組件基本欄位（index/name/city/query_type/source/desc/use_case）
-  - 圖表資料預覽（依 query type 走既有資料函式）
-- 可用工具回答多組件摘要：
-  - 同一 dashboard 內多個組件的簡化摘要
-  - 讓 Agent 可做跨組件整合回答
-## 2.2 Agent 介面操作能力（受控）
-目前只允許以下白名單操作（避免 Agent 任意操作）：
+# Agent 與儀表板組件整合指南（模板版）
 
-- `navigate_dashboard`
-- `open_component_info`
-- `switch_city`
-執行原則：
-- 非白名單 action 一律忽略
-- 缺必要參數會回報失敗原因
-- 每次執行結果都回寫到聊天訊息與 log
-## 3. 目前資料流（簡化）
-1. 使用者輸入問題
-2. `chatStore` 組合 `ui_context` + `tools schema`
-3. 呼叫 `/api/v1/ai/chat/twai`
-4. LLM 決定是否呼叫 tools（由後端 tool loop 執行）
-5. 前端解析 Agent 回覆：
-   - 文字回覆 `reply`
-   - 介面操作 `ui_actions`
-6. `chatStore` 驗證白名單後執行 action
-7. 回饋 action 執行結果給使用者
-8. 若 Agent 失敗，fallback 走既有向量推薦流程
-## 4. 未來新增組件時，如何讓 Agent 能取得資訊
-建議原則：**優先擴充後端 tool，不增加前端複雜度**。
-### 步驟 A：先確認組件資料可由既有模型取得
-新增組件後，確認以下資料鏈路可用：
-- `components` / `query_charts` 有完整 metadata（index、desc、query_type）
-- chart 查詢可透過既有函式取得（如 `GetComponentChartDataQuery` + 對應解析函式）
-### 步驟 B：決定是「通用工具」還是「領域工具」
-- 若需求可抽象化（例如多數組件都能用）：
-  - 優先擴充 `get_component_facts`
-- 若需求是領域特化（例如特定運算邏輯）：
-  - 新增一個新 tool（例如 `get_xxx_domain_insight`）
-### 步驟 C：在後端新增/註冊工具
-1. 在 `app/services/ai/tools/` 新增 tool 函式檔案  
-2. 實作 `ToolFunc` 簽名：`func(ctx context.Context, args string) (string, error)`  
-3. 內部重用 `models` 層資料查詢函式  
-4. 在 `registry.go` `Register("tool_name", ToolFunc)` 註冊
-### 步驟 D：前端只加 schema（最小變更）
-在 `chatStore.js` 的 `AGENT_TOOLS` 增加新 tool schema，讓 LLM 可呼叫該工具。
-## 5. 未來新增組件時，如何讓 Agent 能操作該組件介面
-建議原則：**前端操作能力採白名單，逐步增加，不直接放開任意命令**。
-### 步驟 A：定義操作意圖（action type）
-先定義固定 action type，例如：
-- `open_component_info`
-- `navigate_dashboard`
-- `switch_city`
-- （未來可加）`focus_map_layer`
-- （未來可加）`set_time_range`
-### 步驟 B：把 action 加入白名單與執行器
-在 `chatStore.js`：
-1. 加入 `ALLOWED_UI_ACTIONS`
-2. 在 `executeUIActions` 中實作該 action 的參數驗證與路由/狀態操作
-3. 保留錯誤訊息回饋（便於 debug 與使用者理解）
-### 步驟 C：更新 system prompt 的 action 合約
-明確告訴 LLM：
-- 可用 action type
-- 每個 action 需要哪些 `params`
-- 回覆 JSON 格式固定：`reply` + `ui_actions`
-## 6. 建議的擴充準則（保持簡潔）
-- 複雜邏輯放後端 tools，不堆在前端
-- 前端只做三件事：送上下文、渲染回覆、受控執行 action
-- 每新增一個 domain tool，不修改主聊天流程
-- 每新增一個 action，先白名單、再執行器、再回饋訊息
-## 7. 後續建議
-- 增加 `/ai/tools` schema 端點（由後端提供工具清單，前端不用硬編）
-- 為 action 增加風險等級（高風險操作需二次確認）
-- 增加 tool 執行觀測欄位（latency、成功率、error type）
+本文件保留可重用的 Agent 能力接線方式，供後續新增任意儀表板組件沿用。
+
+## 1. 保留中的核心能力
+
+### 能力 A：回答單一組件資訊
+- 後端工具：`get_component_facts`
+- 用途：依 `component_id` 或 `component_index` 回傳組件基本資料與可選圖表預覽
+- 入口：
+  - 工具實作：`Taipei-City-Dashboard-BE/app/services/ai/tools/component_tools.go`
+  - 工具註冊：`Taipei-City-Dashboard-BE/app/services/ai/tools/registry.go`
+  - 前端 schema：`Taipei-City-Dashboard-FE/src/store/chatStore.js` 的 `AGENT_TOOLS`
+
+### 能力 B：結合多個組件資訊回應
+- 後端工具：`get_dashboard_component_summary`
+- 用途：依 `dashboard_index` 回傳多組件摘要（含上限控制）
+- 典型場景：回答「這個主題整體趨勢」或「跨組件比較」
+
+### 能力 C：結合使用者地理位置與儀表板資訊回應
+- 後端工具：`get_nearby_ubike_summary`（位置型工具範例）
+- 工具內部已模板化為「附近點位彙總核心」：
+  - 通用參數：`component_index`、`provider`、`latitude`、`longitude`、`radius_meters`、`top_n`
+  - 通用輸出：`query_location`、`nearby_stations`、`nearest_stations`
+  - 領域聚合欄位（例如 YouBike 可借/可還總數）可由 provider 補充
+- 前端上下文：`buildUIContext()` 會帶入 `map_context.user_location`
+- 前端定位流程：`requestCurrentLocationForAI()` 於位置型提問時嘗試更新 `mapStore.userLocation`
+- 注意：若使用者拒絕定位，Agent 應回覆缺少定位授權，避免估算假資料
+
+### 能力 D：根據需求操作儀表板（含跳轉、地圖圖層，可單一或多個）
+- 回覆協議：Agent 必須輸出 JSON：`{"reply":"...","ui_actions":[...]}`
+- 受控白名單（前端）：`navigate_dashboard`、`open_component_info`、`switch_city`、`open_map_layer`
+- 執行器：`executeUIActions()` 逐一執行 action，可同時處理多個 action
+- 地圖圖層：`open_map_layer` 會等待組件與地圖載入後開圖層，並回傳執行結果
+
+## 2. 新增組件時的標準串接步驟
+
+### 步驟 1：補齊資料面
+1. 新組件需有穩定的 `index`、`city`、`query_type`、描述欄位。
+2. 若需 Agent 回答數據，需可由現有 `models` 查詢鏈路取回。
+3. 若屬地理型組件，需先定義可查詢資料來源與座標欄位格式。
+
+### 步驟 2：決定工具策略
+1. 若可抽象為通用查詢：優先延伸 `get_component_facts` 或 `get_dashboard_component_summary`。
+2. 若有領域邏輯（如距離、路徑、事件推導）：新增獨立工具（建議 `get_<domain>_summary`）。
+3. 工具回傳一律 JSON，可被 LLM 直接引用，避免自然語言拼接資料。
+4. 若是地理型工具，優先沿用 `buildNearbySummary(...)` 模板，僅替換資料來源與聚合欄位。
+
+### 步驟 3：後端註冊工具
+1. 在 `app/services/ai/tools/` 實作 `func(ctx context.Context, args string) (string, error)`。
+2. 在 `registry.go` `Register("tool_name", ToolFunc)`。
+3. 確保工具錯誤訊息可讀且可回傳給 LLM（方便修正參數）。
+4. 若新增 provider，建議參數維持 `provider` + `component_index`，避免再做硬編碼路由。
+
+### 步驟 4：前端宣告工具 schema
+1. 在 `chatStore.js` 的 `AGENT_TOOLS` 新增同名 schema。
+2. 明確定義 `required` 欄位與 `city` 合法值（目前為 `taipei` 或 `metrotaipei`）。
+3. 不在前端做業務運算；前端只傳上下文與執行 action。
+
+### 步驟 5：若需 UI 操作，新增 action 合約
+1. 先定義 action type 與 `params` 契約。
+2. 加入 `ALLOWED_UI_ACTIONS` 白名單。
+3. 在 `executeUIActions()` 補實作，並保留失敗訊息。
+4. 若要一次操作多個目標，讓 Agent 回傳多筆 `ui_actions`，前端逐筆執行。
+
+### 步驟 6：更新 system prompt（必要）
+1. 新工具名稱、用途與參數要寫清楚。
+2. 新 action type 與參數要寫清楚。
+3. 明確要求：資料問題優先用工具；`ui_actions` 不可輸出未授權 type。
+
+## 3. 最小驗收清單（每次新增組件都跑）
+
+- 單組件問答：Agent 會呼叫對應工具並回傳正確組件資訊。
+- 多組件整合：Agent 可引用 `get_dashboard_component_summary` 做綜合回答。
+- 定位整合：有座標時可呼叫位置型工具；無座標時會要求定位授權。
+- UI 操作：
+  - 可跳轉正確儀表板/組件。
+  - 在地圖頁可開啟指定圖層。
+  - 可連續執行一個以上 action。
+
+## 4. 維運原則（避免後續失控）
+
+- 工具邏輯放後端，前端只負責協議與執行。
+- action 永遠白名單，禁止任意命令直通路由。
+- 不要為單一組件硬編碼固定 dashboard；改由工具/索引解析。
+- Agent 回傳格式固定 JSON，並保留 `reply` 與 `ui_actions` 雙軌。
