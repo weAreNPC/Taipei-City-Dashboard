@@ -33,6 +33,7 @@ bike_network	{#a0b8e8,#b7ff98}	{DonutChart,BarChart}	公里
 bike_map	{#a0b8e8,#b7ff98}	{MapLegend}	條
 elderly_population_ratio	{#E87B51,#F4A261,#E9C46A,#2A9D8F,#264653,#F77F00,#D62828,#023E8A,#48CAE4,#74B72E,#9B5DE5,#00B4D8}	{BarChart}	%
 age_population_trend	{#56B96D,#24B0DD,#F4A261}	{TimelineSeparateChart}	%
+green_stores	{#4CAF50,#81C784}	{MapLegend}	間
 \.
 
 
@@ -45,6 +46,8 @@ COPY public.component_maps (id, index, title, type, source, size, icon, paint, p
 99	youbike_realtime_metrotaipei	youbike站點	symbol	geojson	\N	youbike	{}	[{"key":"sna","name":"場站名稱"},{"key":"sno","name":"場站ID"},{"key":"available_return_bikes","name":"可還車位"},{"key":"available_rent_general_bikes","name":"剩餘車輛"}]
 100	bike_network_tpe	自行車路網	line	geojson	\N	\N	{"line-color":["match",["get","direction"],"雙向","#097138","單向","#007BFF","#808080"]}	[\r\n  {"key": "data_time", "name": "數據時間"},\r\n  {"key": "route_name", "name": "路線名稱"},\r\n  {"key": "city_code", "name": "城市代碼"},\r\n  {"key": "city", "name": "城市"},\r\n  {"key": "road_section_start", "name": "起點路段"},\r\n  {"key": "road_section_end", "name": "終點路段"},\r\n  {"key": "direction", "name": "方向"},\r\n  {"key": "cycling_length", "name": "自行車道長度"},\r\n  {"key": "finished_time", "name": "完工時間"},\r\n  {"key": "update_time", "name": "更新時間"}\r\n]
 101	bike_network_metrotaipei	自行車路網	line	geojson	\N	\N	{"line-color":["match",["get","direction"],"雙向","#097138","單向","#007BFF","#808080"]}	[\r\n  {"key": "data_time", "name": "數據時間"},\r\n  {"key": "route_name", "name": "路線名稱"},\r\n  {"key": "city_code", "name": "城市代碼"},\r\n  {"key": "city", "name": "城市"},\r\n  {"key": "road_section_start", "name": "起點路段"},\r\n  {"key": "road_section_end", "name": "終點路段"},\r\n  {"key": "direction", "name": "方向"},\r\n  {"key": "cycling_length", "name": "自行車道長度"},\r\n  {"key": "finished_time", "name": "完工時間"},\r\n  {"key": "update_time", "name": "更新時間"}\r\n]
+102	taipei_green_shop	台北市綠色商店	circle	geojson	\N	\N	{"circle-color":"#4CAF50"}	[{"key":"名稱","name":"名稱"},{"key":"地址","name":"地址"},{"key":"商店編號","name":"商店編號"},{"key":"類型","name":"類型"}]
+103	metro_green_stores	雙北綠色商店	circle	geojson	\N	\N	{"circle-color":"#4CAF50"}	[{"key":"name","name":"名稱"},{"key":"address","name":"地址"},{"key":"number","name":"商店編號"},{"key":"type","name":"類型"},{"key":"city","name":"城市"}]
 \.
 
 
@@ -63,6 +66,7 @@ COPY public.components (id, index, name) FROM stdin;
 217	bike_map	自行車道路網圖資
 1	elderly_population_ratio	各行政區老年人口比例
 2	age_population_trend	三大年齡層比例趨勢
+219	green_stores	綠色商店
 \.
 
 
@@ -91,6 +95,8 @@ COPY public.dashboards (id, index, name, components, icon, updated_at, created_a
 362	population_aging_metrotaipei	人口老齡化分析	{1}	elderly	2026-04-28 11:24:47.886826+00	2026-04-28 11:24:47.886826+00
 363	age_trend_taipei	人口結構趨勢	{2}	analytics	2026-04-28 11:38:45.345638+00	2026-04-28 11:38:45.345638+00
 364	age_trend_metrotaipei	人口結構趨勢	{2}	analytics	2026-04-28 11:38:45.345638+00	2026-04-28 11:38:45.345638+00
+365	green_stores_taipei	台北市綠色商店	{219}	eco	2026-05-02 00:00:00+00	2026-05-02 00:00:00+00
+366	green_stores_metrotaipei	雙北綠色商店	{219}	eco	2026-05-02 00:00:00+00	2026-05-02 00:00:00+00
 \.
 
 
@@ -134,6 +140,8 @@ elderly_population_ratio	\N	{}	\N	static	\N	1	year	臺北市政府民政局	臺�
 age_population_trend	\N	\N	\N	static	\N	1	year	臺北市政府主計處	臺北市0-14歲、15-64歲、65歲以上人口占比長期趨勢	呈現臺北市三大年齡層（幼年0-14歲、壯年15-64歲、老年65歲以上）佔總人口比例的長期歷史趨勢。資料涵蓋數十年紀錄，清楚反映幼年人口持續下降、老年人口穩定攀升的人口結構轉變歷程。	可用於觀察臺北市人口老齡化速度與幼年人口萎縮趨勢，協助教育、醫療、長照等公共資源的長期規劃與政策制定。	{https://data.taipei/dataset/detail?id=aafb15dc-5508-4091-bd48-a708e60f6698}	{doit}	2026-04-28 11:38:45.345638+00	2026-04-28 11:38:45.345638+00	time	SELECT TO_TIMESTAMP(CONCAT(end_of_year, '-01-01'), 'YYYY-MM-DD') AT TIME ZONE 'Asia/Taipei' AS x_axis, '0-14歲(%)' AS y_axis, young_population_percentage AS data FROM dependency_ratio_and_aging_index_tpe UNION ALL SELECT TO_TIMESTAMP(CONCAT(end_of_year, '-01-01'), 'YYYY-MM-DD') AT TIME ZONE 'Asia/Taipei', '15-64歲(%)', working_age_population_percentage FROM dependency_ratio_and_aging_index_tpe UNION ALL SELECT TO_TIMESTAMP(CONCAT(end_of_year, '-01-01'), 'YYYY-MM-DD') AT TIME ZONE 'Asia/Taipei', '65歲以上(%)', elderly_population_percentage FROM dependency_ratio_and_aging_index_tpe ORDER BY x_axis	\N	taipei
 elderly_population_ratio	\N	{}	\N	static	\N	1	year	臺北市政府民政局、新北市政府民政局	雙北各行政區65歲以上人口比例	統計臺北市及新北市各行政區中，65歲以上人口佔各行政區總人口的百分比，反映各區老齡化程度。資料來源：臺北市政府民政局、新北市政府民政局人口統計。	可用於比較雙北各行政區老齡化程度差異，協助跨域制定長照資源分配與社福政策。	{https://data.taipei/,https://data.ntpc.gov.tw/}	{doit,ntpc}	2026-04-28 11:24:47.886826+00	2026-04-28 11:24:47.886826+00	two_d	SELECT 區域別 as x_axis, ROUND(percent25::numeric, 2) as data FROM city_age_distribution_taipei WHERE 年份 = (SELECT MAX(年份) FROM city_age_distribution_taipei) AND 統計類型 = '計' AND 區域別 != '總計' UNION ALL SELECT 區域別 as x_axis, ROUND(percent25::numeric, 2) as data FROM city_age_distribution_newtaipei WHERE 年份 = (SELECT MAX(年份) FROM city_age_distribution_newtaipei) AND 統計類型 = '計' AND 區域別 != '新北市' ORDER BY data DESC	\N	metrotaipei
 age_population_trend	\N	\N	\N	static	\N	1	year	臺北市政府主計處、新北市政府主計處	雙北0-14歲、15-64歲、65歲以上人口占比長期趨勢	呈現臺北市與新北市三大年齡層（幼年0-14歲、壯年15-64歲、老年65歲以上）佔總人口比例的長期歷史趨勢平均值。資料涵蓋數十年紀錄，清楚反映幼年人口持續下降、老年人口穩定攀升的人口結構轉變歷程。	可用於比較雙北地區人口老齡化速度與幼年人口萎縮趨勢，協助教育、醫療、長照等公共資源的長期規劃與跨域政策制定。	{https://data.taipei/dataset/detail?id=aafb15dc-5508-4091-bd48-a708e60f6698,https://data.ntpc.gov.tw/datasets/8308ab58-62d1-424e-8314-24b65b7ab492}	{doit,ntpc}	2026-04-28 11:38:45.345638+00	2026-04-28 11:38:45.345638+00	time	SELECT TO_TIMESTAMP(CONCAT(d.end_of_year, '-01-01'), 'YYYY-MM-DD') AT TIME ZONE 'Asia/Taipei' AS x_axis, '0-14歲(%)' AS y_axis, ROUND(AVG(d.young_population_percentage)::numeric,2) AS data FROM (SELECT end_of_year, young_population_percentage FROM dependency_ratio_and_aging_index_tpe UNION ALL SELECT end_of_year, young_population_percentage FROM dependency_ratio_and_aging_index_new_tpe) d GROUP BY d.end_of_year UNION ALL SELECT TO_TIMESTAMP(CONCAT(d.end_of_year, '-01-01'), 'YYYY-MM-DD') AT TIME ZONE 'Asia/Taipei', '15-64歲(%)', ROUND(AVG(d.working_age_population_percentage)::numeric,2) FROM (SELECT end_of_year, working_age_population_percentage FROM dependency_ratio_and_aging_index_tpe UNION ALL SELECT end_of_year, working_age_population_percentage FROM dependency_ratio_and_aging_index_new_tpe) d GROUP BY d.end_of_year UNION ALL SELECT TO_TIMESTAMP(CONCAT(d.end_of_year, '-01-01'), 'YYYY-MM-DD') AT TIME ZONE 'Asia/Taipei', '65歲以上(%)', ROUND(AVG(d.elderly_population_percentage)::numeric,2) FROM (SELECT end_of_year, elderly_population_percentage FROM dependency_ratio_and_aging_index_tpe UNION ALL SELECT end_of_year, elderly_population_percentage FROM dependency_ratio_and_aging_index_new_tpe) d GROUP BY d.end_of_year ORDER BY x_axis	\N	metrotaipei
+green_stores	\N	{102}	{}	static	\N	\N	\N	環保局	顯示臺北市綠色商店分布。	臺北市綠色商店是通過環保認證的商店，致力於推廣環保理念與綠色消費，涵蓋連鎖型及獨立型綠色商店。	可用於查詢臺北市附近的綠色商店，推廣環保消費行為，並作為城市永續發展政策的參考依據。	{https://data.taipei/dataset/detail?id=綠色商店}	{doit}	2026-05-02 00:00:00+00	2026-05-02 00:00:00+00	map_legend	SELECT unnest(array['台北市綠色商店']) as name, 'circle' as type	\N	taipei
+green_stores	\N	{103}	{}	static	\N	\N	\N	環保局	顯示雙北綠色商店分布。	雙北地區（臺北市與新北市）通過環保認證的綠色商店分布，涵蓋連鎖型及獨立型綠色商店，共計超過1400間。	可用於查詢雙北地區附近的綠色商店，推廣環保消費行為，並作為跨域永續發展政策的參考依據。	{https://data.taipei/dataset/detail?id=綠色商店,https://data.ntpc.gov.tw/}	{doit,ntpc}	2026-05-02 00:00:00+00	2026-05-02 00:00:00+00	map_legend	SELECT unnest(array['雙北綠色商店']) as name, 'circle' as type	\N	metrotaipei
 \.
 
 
@@ -151,6 +159,10 @@ COPY public.dashboard_groups (dashboard_id, group_id) FROM stdin;
 363	2
 364	1
 364	3
+365	1
+365	2
+366	1
+366	3
 \.
 
 --
