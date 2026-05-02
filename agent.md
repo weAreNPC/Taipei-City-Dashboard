@@ -18,11 +18,10 @@
 - 典型場景：回答「這個主題整體趨勢」或「跨組件比較」
 
 ### 能力 C：結合使用者地理位置與儀表板資訊回應
-- 後端工具：`get_nearby_ubike_summary`（位置型工具範例）
-- 工具內部已模板化為「附近點位彙總核心」：
-  - 通用參數：`component_index`、`provider`、`latitude`、`longitude`、`radius_meters`、`top_n`
-  - 通用輸出：`query_location`、`nearby_stations`、`nearest_stations`
-  - 領域聚合欄位（例如 YouBike 可借/可還總數）可由 provider 補充
+- 後端工具：`get_geo_nearby_for_component`（統一鄰近查詢；模式由既有資料推導：`youbike_availability` → YouBike 站點；否則若 `map_config` 綁定之 `component_maps` 含 `source=geojson` → 與前端相同之 `mapData/{index}.geojson` 點位）
+- GET `/api/v1/ai/component-routing-manifest` 各組件列 `geo_nearby_supported`、`geo_nearby_provider`（皆為推導值，非額外 DB 欄位）。
+- 輸入：`component_index`、`city`、`latitude`、`longitude`、`radius_meters`、`top_n`
+- 輸出：`query_location`、`nearby_stations`、`nearest_stations`（YouBike 另有可借/可還加總欄位）
 - 前端上下文：`buildUIContext()` 會帶入 `map_context.user_location`
 - 前端定位流程：`requestCurrentLocationForAI()` 於位置型提問時嘗試更新 `mapStore.userLocation`
 - 注意：若使用者拒絕定位，Agent 應回覆缺少定位授權，避免估算假資料
@@ -42,15 +41,14 @@
 
 ### 步驟 2：決定工具策略
 1. 若可抽象為通用查詢：優先延伸 `get_component_facts` 或 `get_dashboard_component_summary`。
-2. 若有領域邏輯（如距離、路徑、事件推導）：新增獨立工具（建議 `get_<domain>_summary`）。
+2. **鄰近／距離**：統一走 `get_geo_nearby_for_component`；無需新增 DB 欄位——YouBike 用固定 `index`；其他主題須在 `component_maps` 有 `geojson` 圖層並提供與前端一致的 `public/mapData/{圖層 index}.geojson`。
 3. 工具回傳一律 JSON，可被 LLM 直接引用，避免自然語言拼接資料。
-4. 若是地理型工具，優先沿用 `buildNearbySummary(...)` 模板，僅替換資料來源與聚合欄位。
+4. 若是 `map_geojson`，優先沿用 `buildNearbySummary(...)`；若有領域聚合再在分支補欄位。
 
-### 步驟 3：後端註冊工具
-1. 在 `app/services/ai/tools/` 實作 `func(ctx context.Context, args string) (string, error)`。
-2. 在 `registry.go` `Register("tool_name", ToolFunc)`。
+### 步驟 3：後端註冊工具（鄰近查詢免新增一支）
+1. 鄰近查詢僅維護 `GetGeoNearbyForComponent`；新資料源可在 `deriveGeoNearbyMode`／載入鏈路擴充，或沿用「geojson 圖層 + mapData 檔」慣例。
+2. 一般工具仍在 `app/services/ai/tools/` 實作 `func(ctx context.Context, args string) (string, error)` 並 `Register(...)`。
 3. 確保工具錯誤訊息可讀且可回傳給 LLM（方便修正參數）。
-4. 若新增 provider，建議參數維持 `provider` + `component_index`，避免再做硬編碼路由。
 
 ### 步驟 4：前端宣告工具 schema
 1. 在 `chatStore.js` 的 `AGENT_TOOLS` 新增同名 schema。

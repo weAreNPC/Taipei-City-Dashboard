@@ -17,9 +17,9 @@ import (
 
 // Component is the model for the components table.
 type Component struct {
-	ID             int64           `json:"id" gorm:"column:id;autoincrement;primaryKey"`
-	Index          string          `json:"index" gorm:"column:index;type:varchar;unique;not null"     `
-	Name           string          `json:"name" gorm:"column:name;type:varchar;not null"`
+	ID    int64  `json:"id" gorm:"column:id;autoincrement;primaryKey"`
+	Index string `json:"index" gorm:"column:index;type:varchar;unique;not null"     `
+	Name  string `json:"name" gorm:"column:name;type:varchar;not null"`
 }
 
 // QueryCharts is the model for the query_charts table.

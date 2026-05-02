@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 /* ----- Models ----- */
@@ -117,14 +119,18 @@ type MapLegendData struct {
 func GetComponentChartDataQuery(id int, city string) (queryType string, queryString string, err error) {
 	var chartDataQuery ChartDataQuery
 
+	// 主表用 query_charts，否則 GORM 可能對不存在的 components.query_type 排序（SQLSTATE 42703）。
 	err = DBManager.
-		Table("components").
+		Table("query_charts").
 		Select("query_charts.query_type, query_charts.query_chart").
-		Joins("LEFT JOIN query_charts ON components.index = query_charts.index").
+		Joins("INNER JOIN components ON components.index = query_charts.index").
 		Where("components.id = ?", id).
 		Where("query_charts.city = ?", city).
-		Find(&chartDataQuery).Error
+		Take(&chartDataQuery).Error
 	if err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return queryType, queryString, fmt.Errorf("no chart query for component id=%d city=%s", id, city)
+		}
 		return queryType, queryString, err
 	}
 	return chartDataQuery.QueryType, chartDataQuery.QueryChart, nil

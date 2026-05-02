@@ -162,6 +162,34 @@ func PickUniqueMapLayerComponentFromQuestion(accountID int, question string, cit
 	return top.ComponentIndex, top.City, true
 }
 
+// PickTopMapLayerComponentFromQuestion 取有地圖圖層者中「分數第一名」（不要求與第二名領先幅度）。
+// 當 PickUniqueMapLayerComponentFromQuestion 因歧義失敗時，作為自動開層後備。
+// minAcceptScore≤0 時預設 120；低於門檻表示匹配信心不足，避免空泛問題誤開圖層。
+func PickTopMapLayerComponentFromQuestion(accountID int, question string, cityHint string, minAcceptScore float64) (componentIndex string, city string, ok bool) {
+	const candidatePool = 48
+	if minAcceptScore <= 0 {
+		minAcceptScore = 120
+	}
+	scored, err := ResolveComponentMatchesWithScores(accountID, question, cityHint, candidatePool)
+	if err != nil || len(scored) == 0 {
+		return "", "", false
+	}
+	bikeLane := UserQuestionHintsBikeLaneInfrastructure(question)
+	for _, s := range scored {
+		if !s.HasMapLayer {
+			continue
+		}
+		if bikeLane && strings.EqualFold(strings.TrimSpace(s.ComponentIndex), "youbike_availability") {
+			continue
+		}
+		if s.Score < minAcceptScore {
+			return "", "", false
+		}
+		return s.ComponentIndex, s.City, true
+	}
+	return "", "", false
+}
+
 // DashboardNavMatch 儀表板名稱／index 模糊搜尋結果。
 type DashboardNavMatch struct {
 	DashboardIndex string `json:"dashboard_index"`
@@ -204,7 +232,27 @@ func scoreDashboardMatch(queryNorm, cityNorm, sidebarSource string, d Dashboard)
 			s += 90
 		}
 	}
+	s += dashboardTopicSynonymBonus(queryNorm, name, idx)
 	return s
+}
+
+// dashboardTopicSynonymBonus 將中文主題語句與英文 dashboard index 對齊（例如「環保統計」→ environment_*），供 resolve_navigation_target 召回。
+func dashboardTopicSynonymBonus(queryNorm, nameLower, idxLower string) float64 {
+	var b float64
+	envQuery := strings.Contains(queryNorm, "環保") || strings.Contains(queryNorm, "環境") ||
+		strings.Contains(queryNorm, "永續") || strings.Contains(queryNorm, "淨零") ||
+		strings.Contains(queryNorm, "減碳") || strings.Contains(queryNorm, "綠色能源") ||
+		strings.Contains(queryNorm, "環保統計")
+	if envQuery {
+		if strings.Contains(idxLower, "environment") || strings.Contains(idxLower, "sustainab") ||
+			strings.Contains(idxLower, "carbon") && strings.Contains(idxLower, "emission") {
+			b += 480
+		}
+		if strings.Contains(nameLower, "環保") || strings.Contains(nameLower, "環境") || strings.Contains(nameLower, "永續") {
+			b += 400
+		}
+	}
+	return b
 }
 
 // sidebarCityDefault 由側欄來源推斷 navigate 常用 query city。

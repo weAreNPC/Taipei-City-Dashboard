@@ -8,9 +8,170 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tmc/langchaingo/llms"
 )
+
+var allowedFrontendUIActionTypes = map[string]struct{}{
+	"navigate_dashboard":  {},
+	"open_component_info": {},
+	"switch_city":         {},
+	"open_map_layer":      {},
+}
+
+// coerceUIActionsFromRaw 將模型常見錯誤格式（例如 ["open_map_layer", {...params}]、嵌套 JSON 字串）轉成前端可用的 []{type,params}。
+func coerceUIActionsFromRaw(raw json.RawMessage) []map[string]interface{} {
+	if len(raw) == 0 || string(raw) == "null" {
+		return []map[string]interface{}{}
+	}
+	var arr []interface{}
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		var single map[string]interface{}
+		if err2 := json.Unmarshal(raw, &single); err2 == nil {
+			return []map[string]interface{}{normalizeOneUIActionMap(single)}
+		}
+		return []map[string]interface{}{}
+	}
+	out := make([]map[string]interface{}, 0, len(arr))
+	for i := 0; i < len(arr); i++ {
+		switch x := arr[i].(type) {
+		case string:
+			s := strings.TrimSpace(x)
+			if s == "" {
+				continue
+			}
+			if strings.HasPrefix(s, "{") {
+				var m map[string]interface{}
+				if json.Unmarshal([]byte(s), &m) == nil {
+					out = append(out, normalizeOneUIActionMap(m))
+				}
+				continue
+			}
+			if _, known := allowedFrontendUIActionTypes[s]; known && i+1 < len(arr) {
+				if next, ok := arr[i+1].(map[string]interface{}); ok {
+					out = append(out, map[string]interface{}{
+						"type":   s,
+						"params": paramsMapFromLooseObject(next),
+					})
+					i++
+					continue
+				}
+			}
+		case map[string]interface{}:
+			out = append(out, normalizeOneUIActionMap(x))
+		default:
+			continue
+		}
+	}
+	return out
+}
+
+func paramsMapFromLooseObject(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return map[string]interface{}{}
+	}
+	if p, ok := m["params"].(map[string]interface{}); ok && p != nil {
+		return p
+	}
+	out := make(map[string]interface{})
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// normalizeOneUIActionMap：action→type、頂層欄位收斂到 params、無 type 時依欄位推斷。
+func normalizeOneUIActionMap(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	typ := strings.TrimSpace(paramString(m["type"]))
+	if typ == "" {
+		if a := strings.TrimSpace(paramString(m["action"])); a != "" {
+			typ = a
+		}
+	}
+	if typ == "" {
+		if fn := strings.TrimSpace(paramString(m["function_name"])); fn != "" {
+			typ = fn
+		}
+	}
+	if typ == "" {
+		if firstNonEmpty(
+			paramString(m["component_index"]),
+			paramString(m["index"]),
+			paramString(m["component"]),
+			paramString(m["layer"]),
+		) != "" {
+			typ = "open_map_layer"
+		} else if firstNonEmpty(
+			paramString(m["index"]),
+			paramString(m["dashboard_index"]),
+			paramString(m["dashboard"]),
+		) != "" {
+			typ = "navigate_dashboard"
+		}
+	}
+	if typ == "" {
+		return m
+	}
+	var params map[string]interface{}
+	if p, ok := m["params"].(map[string]interface{}); ok && p != nil {
+		params = p
+	} else {
+		params = paramsMapFromLooseObject(m)
+		for _, key := range []string{"type", "params", "action", "function_name"} {
+			delete(params, key)
+		}
+	}
+	return map[string]interface{}{
+		"type":   typ,
+		"params": params,
+	}
+}
+
+// repairLenientAgentJSONString 修正模型常見錯誤（例如尾端多一個 "），避免整段無法 parse 而跳過 finalize 注入。
+func repairLenientAgentJSONString(s string) string {
+	b := []byte(strings.TrimSpace(s))
+	for i := 0; i < 10; i++ {
+		var probe map[string]interface{}
+		if json.Unmarshal(b, &probe) == nil {
+			return string(b)
+		}
+		if len(b) == 0 {
+			break
+		}
+		if b[len(b)-1] == '"' {
+			b = b[:len(b)-1]
+			continue
+		}
+		break
+	}
+	return string(b)
+}
+
+func parseNormalizedAIResponseFlexible(trimmed string) (normalizedAIResponse, error) {
+	var outer struct {
+		Reply json.RawMessage `json:"reply"`
+		UIRaw json.RawMessage `json:"ui_actions"`
+	}
+	payloadBytes := []byte(trimmed)
+	if err := json.Unmarshal(payloadBytes, &outer); err != nil {
+		relaxed := repairLenientAgentJSONString(trimmed)
+		if err2 := json.Unmarshal([]byte(relaxed), &outer); err2 != nil {
+			return normalizedAIResponse{}, err
+		}
+	}
+	var reply string
+	if len(outer.Reply) > 0 && string(outer.Reply) != "null" {
+		_ = json.Unmarshal(outer.Reply, &reply)
+	}
+	return normalizedAIResponse{
+		Reply:     reply,
+		UIActions: coerceUIActionsFromRaw(outer.UIRaw),
+	}, nil
+}
 
 const uiActionsRepairSystemPrompt = `你是 JSON 修正器。使用者會提供一個物件，含 reply（字串）與 ui_actions（陣列）。
 請輸出同一結構的合法 JSON：不要 markdown、不要註解、不要額外文字。
@@ -24,7 +185,8 @@ const uiActionsRepairSystemPrompt = `你是 JSON 修正器。使用者會提供�
 - switch_city：params 必須含 city 與 index。
 保留原 reply 的語意與主要文字，僅修正 ui_actions 結構與欄位名。
 也可接受 component_name／dashboard_name 等寬鬆欄位，請盡量改為標準 index／component_index。
-若使用者問題是在問「資訊／說明／有哪些」而非明确要求前往畫面，請勿為了補 ui_actions 而把 reply 改成只有「請自行查看」；應保留或補上實質摘要（模型應已透過工具取得）。`
+若使用者問題是在問「資訊／說明／有哪些」而非明确要求前往畫面，請勿為了補 ui_actions 而把 reply 改成只有「請自行查看」；應保留或補上實質摘要（模型應已透過工具取得）。
+若 reply 涉及某儀表板主題統計且已有 navigate_dashboard 用以同步畫面至該 index／city，請保留該 navigate_dashboard（勿刪）。`
 
 func stripAnswerMarkdownFence(raw string) string {
 	trimmed := strings.TrimSpace(raw)
@@ -80,7 +242,10 @@ func componentIndexFromUbikeTool(toolResults map[string]string) string {
 	if toolResults == nil {
 		return ""
 	}
-	raw := toolResults["get_nearby_ubike_summary"]
+	raw := toolResults["get_geo_nearby_for_component"]
+	if raw == "" {
+		raw = toolResults["get_nearby_ubike_summary"]
+	}
 	if raw == "" || strings.HasPrefix(raw, "Error:") {
 		return ""
 	}
@@ -182,6 +347,30 @@ type mapLayerTarget struct {
 
 const ubikeFallbackDashboardIndex = "practical_transportation_newtpe"
 const ubikeFallbackDashboardCity = "metrotaipei"
+
+// 與全站 component 目錄一致：自行車「道／路網」圖層（非 YouBike 站點）。
+const bikeLaneFallbackComponentIndex = "bike_network"
+const greenStoresFallbackComponentIndex = "green_stores"
+
+// inferOpenMapLayerCityTwinNorthAware 雙北關鍵字→metrotaipei；否則 GPS／儀表板 city；最後 fallbackCity。
+func inferOpenMapLayerCityTwinNorthAware(ctx context.Context, uiPayload string, lastUserQuestion string, fallbackCity string) string {
+	q := strings.TrimSpace(lastUserQuestion)
+	if strings.Contains(q, "雙北") {
+		return "metrotaipei"
+	}
+	locCtx := ctx
+	if locCtx == nil {
+		locCtx = context.Background()
+	}
+	locCtx, cancel := context.WithTimeout(locCtx, 3*time.Second)
+	defer cancel()
+	if h := models.InferPreferredAgentCityFromUIPayloadWithContext(locCtx, uiPayload); h != "" {
+		if c := models.NormalizeAgentCity(h); c == "taipei" || c == "metrotaipei" {
+			return c
+		}
+	}
+	return fallbackCity
+}
 
 func extractLastUserPlainText(messages []llms.MessageContent) string {
 	for i := len(messages) - 1; i >= 0; i-- {
@@ -312,13 +501,22 @@ func extractMapLayerTargets(payload *normalizedAIResponse, toolResults map[strin
 	if tb := strings.TrimSpace(componentIndexFromUbikeTool(toolResults)); tb != "" {
 		add(tb, "")
 	}
+	if raw := strings.TrimSpace(toolResults["open_map_layer"]); raw != "" && !strings.HasPrefix(raw, "Error:") {
+		var tr struct {
+			ComponentIndex string `json:"component_index"`
+			City           string `json:"city"`
+		}
+		if json.Unmarshal([]byte(raw), &tr) == nil && tr.ComponentIndex != "" {
+			add(tr.ComponentIndex, tr.City)
+		}
+	}
 	if len(out) == 0 && userQuestionHintsUbikeMapLayer(lastUserQuestion) {
 		add("youbike_availability", "")
 	}
 	return out
 }
 
-func ensureUbikeOpenMapLayerFromUserQuestion(payload *normalizedAIResponse, lastUserQuestion string) {
+func ensureUbikeOpenMapLayerFromUserQuestion(ctx context.Context, payload *normalizedAIResponse, lastUserQuestion string, uiPayload string) {
 	if payload == nil || !userQuestionHintsUbikeMapLayer(lastUserQuestion) {
 		return
 	}
@@ -330,11 +528,23 @@ func ensureUbikeOpenMapLayerFromUserQuestion(payload *normalizedAIResponse, last
 			return
 		}
 	}
+	cy := ubikeFallbackDashboardCity
+	locCtx := ctx
+	if locCtx == nil {
+		locCtx = context.Background()
+	}
+	locCtx, cancel := context.WithTimeout(locCtx, 3*time.Second)
+	defer cancel()
+	if h := models.InferPreferredAgentCityFromUIPayloadWithContext(locCtx, uiPayload); h != "" {
+		if c := models.NormalizeAgentCity(h); c == "taipei" || c == "metrotaipei" {
+			cy = c
+		}
+	}
 	payload.UIActions = append(payload.UIActions, map[string]interface{}{
 		"type": "open_map_layer",
 		"params": map[string]interface{}{
 			"component_index": "youbike_availability",
-			"city":            ubikeFallbackDashboardCity,
+			"city":            cy,
 		},
 	})
 }
@@ -373,8 +583,8 @@ func userQuestionHintsGenericMapVisualization(q string) bool {
 	return false
 }
 
-// ensureGenericOpenMapLayerFromUserQuestion 以 manifest 分數唯一性推斷 component_index（僅 HasMapLayer）；信心不足則不注入。
-func ensureGenericOpenMapLayerFromUserQuestion(payload *normalizedAIResponse, lastUserQuestion string, accountID int) {
+// ensureGenericOpenMapLayerFromUserQuestion 以 manifest 分數推斷 component_index（僅 HasMapLayer）；並優先以 ui_context 定位打破雙北同名組件歧義。
+func ensureGenericOpenMapLayerFromUserQuestion(ctx context.Context, payload *normalizedAIResponse, lastUserQuestion string, accountID int, uiPayload string) {
 	if payload == nil || strings.TrimSpace(lastUserQuestion) == "" {
 		return
 	}
@@ -384,7 +594,30 @@ func ensureGenericOpenMapLayerFromUserQuestion(payload *normalizedAIResponse, la
 	if uiActionsHasOpenMapLayer(payload) {
 		return
 	}
-	ci, cy, ok := models.PickUniqueMapLayerComponentFromQuestion(accountID, lastUserQuestion, "")
+	locCtx := ctx
+	if locCtx == nil {
+		locCtx = context.Background()
+	}
+	locCtx, cancel := context.WithTimeout(locCtx, 3*time.Second)
+	defer cancel()
+	hint := models.InferPreferredAgentCityFromUIPayloadWithContext(locCtx, uiPayload)
+	ci, cy, ok := models.PickUniqueMapLayerComponentFromQuestion(accountID, lastUserQuestion, hint)
+	pickMode := "unique"
+	if !ok && hint != "" {
+		ci, cy, ok = models.PickUniqueMapLayerComponentFromQuestion(accountID, lastUserQuestion, "")
+	}
+	if !ok {
+		ci, cy, ok = models.PickTopMapLayerComponentFromQuestion(accountID, lastUserQuestion, hint, 0)
+		if ok {
+			pickMode = "top1"
+		}
+	}
+	if !ok && hint != "" {
+		ci, cy, ok = models.PickTopMapLayerComponentFromQuestion(accountID, lastUserQuestion, "", 0)
+		if ok {
+			pickMode = "top1"
+		}
+	}
 	if !ok {
 		return
 	}
@@ -395,7 +628,63 @@ func ensureGenericOpenMapLayerFromUserQuestion(payload *normalizedAIResponse, la
 			"city":            cy,
 		},
 	})
-	logs.FInfo("ui_actions: generic map intent — injected open_map_layer component=%s city=%s", ci, cy)
+	logs.FInfo("ui_actions: generic map intent — injected open_map_layer component=%s city=%s pick=%s (location_hint=%q)", ci, cy, pickMode, hint)
+}
+
+// userQuestionHintsGreenStoresMapLayer 綠色商家／綠商店 + 要看地圖或圖層。
+func userQuestionHintsGreenStoresMapLayer(q string) bool {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return false
+	}
+	if !strings.Contains(q, "綠色商家") && !strings.Contains(q, "綠色商店") && !strings.Contains(q, "綠商店") {
+		return false
+	}
+	return userQuestionHintsGenericMapVisualization(q)
+}
+
+// ensureBikeLaneOpenMapLayerFromUserQuestion：模型或 PickUnique 未產出圖層時，自行車道／路網主題改開 bike_network（與 YouBike 站點分離）。
+func ensureBikeLaneOpenMapLayerFromUserQuestion(ctx context.Context, payload *normalizedAIResponse, lastUserQuestion string, uiPayload string) {
+	if payload == nil || strings.TrimSpace(lastUserQuestion) == "" {
+		return
+	}
+	if !models.UserQuestionHintsBikeLaneInfrastructure(lastUserQuestion) {
+		return
+	}
+	if !userQuestionHintsGenericMapVisualization(lastUserQuestion) {
+		return
+	}
+	if uiActionsHasOpenMapLayer(payload) {
+		return
+	}
+	cy := inferOpenMapLayerCityTwinNorthAware(ctx, uiPayload, lastUserQuestion, ubikeFallbackDashboardCity)
+	payload.UIActions = append(payload.UIActions, map[string]interface{}{
+		"type": "open_map_layer",
+		"params": map[string]interface{}{
+			"component_index": bikeLaneFallbackComponentIndex,
+			"city":            cy,
+		},
+	})
+	logs.FInfo("ui_actions: bike lane map — injected open_map_layer %s city=%s", bikeLaneFallbackComponentIndex, cy)
+}
+
+// ensureGreenStoresOpenMapLayerFromUserQuestion：綠色商家地圖主題之後備（與 generic 分數門檻互補）。
+func ensureGreenStoresOpenMapLayerFromUserQuestion(ctx context.Context, payload *normalizedAIResponse, lastUserQuestion string, uiPayload string) {
+	if payload == nil || !userQuestionHintsGreenStoresMapLayer(lastUserQuestion) {
+		return
+	}
+	if uiActionsHasOpenMapLayer(payload) {
+		return
+	}
+	cy := inferOpenMapLayerCityTwinNorthAware(ctx, uiPayload, lastUserQuestion, ubikeFallbackDashboardCity)
+	payload.UIActions = append(payload.UIActions, map[string]interface{}{
+		"type": "open_map_layer",
+		"params": map[string]interface{}{
+			"component_index": greenStoresFallbackComponentIndex,
+			"city":            cy,
+		},
+	})
+	logs.FInfo("ui_actions: green stores map — injected open_map_layer %s city=%s", greenStoresFallbackComponentIndex, cy)
 }
 
 func openMapLayerTargetsIndex(payload *normalizedAIResponse) map[string]struct{} {
@@ -423,6 +712,109 @@ func openMapLayerTargetsIndex(payload *normalizedAIResponse) map[string]struct{}
 		}
 	}
 	return out
+}
+
+func mapLayerDataScopeNoteZh(agentCity string) string {
+	c := models.NormalizeAgentCity(agentCity)
+	switch c {
+	case "taipei":
+		return "【資料範圍】此圖層以臺北市單一縣市（city=taipei）呈現，不含新北市；與雙北合併口徑（metrotaipei）不同。"
+	case "metrotaipei":
+		return "【資料範圍】此圖層為臺北市＋新北市雙北合併（city=metrotaipei）呈現；與僅臺北市（taipei）口徑不同。"
+	default:
+		return ""
+	}
+}
+
+// enrichReplyWithMapLayerDataScopeNote 於開啟地圖圖層時附註資料為「臺北單一縣市」或「雙北合併」，避免與使用者所在位置預期混淆。
+func enrichReplyWithMapLayerDataScopeNote(payload *normalizedAIResponse) {
+	if payload == nil {
+		return
+	}
+	var cy string
+	for _, action := range payload.UIActions {
+		if action == nil {
+			continue
+		}
+		if typ, _ := action["type"].(string); typ != "open_map_layer" {
+			continue
+		}
+		p := ensureParamsMap(action)
+		cy = strings.TrimSpace(firstNonEmpty(paramString(p["city"])))
+		if cy != "" {
+			break
+		}
+	}
+	if cy == "" {
+		return
+	}
+	note := mapLayerDataScopeNoteZh(cy)
+	if note == "" {
+		return
+	}
+	if strings.Contains(payload.Reply, "【資料範圍】") {
+		return
+	}
+	if strings.TrimSpace(payload.Reply) == "" {
+		payload.Reply = note
+		return
+	}
+	payload.Reply = strings.TrimSpace(payload.Reply) + "\n\n" + note
+}
+
+// sanitizeAlienUiActions 將模型誤用「工具呼叫」形狀（function_name + args）轉成前端要的 type + params；並避免虛構 component_index 無法開層。
+func sanitizeAlienUiActions(ctx context.Context, payload *normalizedAIResponse, lastUserQuestion string, uiPayload string) {
+	if payload == nil || len(payload.UIActions) == 0 {
+		return
+	}
+	out := make([]map[string]interface{}, 0, len(payload.UIActions))
+	for _, a := range payload.UIActions {
+		if a == nil {
+			continue
+		}
+		fn := strings.TrimSpace(paramString(a["function_name"]))
+		if fn == "" {
+			out = append(out, a)
+			continue
+		}
+		if _, ok := allowedFrontendUIActionTypes[fn]; !ok {
+			out = append(out, a)
+			continue
+		}
+		if fn != "open_map_layer" {
+			out = append(out, a)
+			continue
+		}
+		arg0 := ""
+		if args, ok := a["args"].([]interface{}); ok && len(args) > 0 {
+			arg0 = strings.ToLower(strings.TrimSpace(fmt.Sprint(args[0])))
+		}
+		ci := ""
+		if strings.Contains(arg0, "green") {
+			ci = greenStoresFallbackComponentIndex
+		} else if strings.Contains(arg0, "bike") {
+			ci = bikeLaneFallbackComponentIndex
+		}
+		if ci == "" && userQuestionHintsGreenStoresMapLayer(lastUserQuestion) {
+			ci = greenStoresFallbackComponentIndex
+		}
+		if ci == "" && models.UserQuestionHintsBikeLaneInfrastructure(lastUserQuestion) {
+			ci = bikeLaneFallbackComponentIndex
+		}
+		if ci == "" {
+			ci = greenStoresFallbackComponentIndex
+		}
+		cy := inferOpenMapLayerCityTwinNorthAware(ctx, uiPayload, lastUserQuestion, ubikeFallbackDashboardCity)
+		out = append(out, map[string]interface{}{
+			"type": "open_map_layer",
+			"params": map[string]interface{}{
+				"component_index": ci,
+				"city":            cy,
+			},
+		})
+		logs.FInfo("ui_actions: sanitized function_name/args -> open_map_layer component=%s city=%s", ci, cy)
+	}
+	payload.UIActions = out
 }
 
 // rewriteNavigateDashboardsForMapLayerComponents 依使用者可見 manifest，將錯誤的 navigate_dashboard（如 map-layers-* 或非組件所屬儀表板）改為建議儀表板與 city。
@@ -695,8 +1087,19 @@ func (s *aiSession) finalizeAnswerJSON(ctx context.Context, rawAnswer string) st
 		return rawAnswer
 	}
 
-	var payload normalizedAIResponse
-	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+	payload, err := parseNormalizedAIResponseFlexible(trimmed)
+	if err != nil {
+		// 模型常在最後輸出整段中文說明而非 JSON，parse 失敗會跳過整條 ui_actions 注入鏈（綠色商店地圖等後備不會執行）。
+		st := strings.TrimSpace(trimmed)
+		if !strings.HasPrefix(st, "{") && !strings.HasPrefix(st, "[") {
+			payload = normalizedAIResponse{
+				Reply:     st,
+				UIActions: []map[string]interface{}{},
+			}
+			err = nil
+		}
+	}
+	if err != nil {
 		return normalizeAIAnswerLegacy(rawAnswer)
 	}
 	if payload.UIActions == nil {
@@ -705,6 +1108,7 @@ func (s *aiSession) finalizeAnswerJSON(ctx context.Context, rawAnswer string) st
 
 	lastUser := extractLastUserPlainText(s.req.Messages)
 
+	sanitizeAlienUiActions(ctx, &payload, lastUser, s.req.UIContextPayload)
 	machineFixUIActions(&payload, s.lastToolResults)
 	accID, _ := strconv.Atoi(strings.TrimSpace(s.req.UserID))
 	if accID < 0 {
@@ -714,8 +1118,10 @@ func (s *aiSession) finalizeAnswerJSON(ctx context.Context, rawAnswer string) st
 	machineFixUIActions(&payload, s.lastToolResults)
 	stripUbikeLayerWhenBikeLaneIntent(&payload, lastUser)
 	rewriteNavigateDashboardsForMapLayerComponents(&payload, accID, s.lastToolResults, lastUser)
-	ensureUbikeOpenMapLayerFromUserQuestion(&payload, lastUser)
-	ensureGenericOpenMapLayerFromUserQuestion(&payload, lastUser, accID)
+	ensureUbikeOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, s.req.UIContextPayload)
+	ensureGenericOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, accID, s.req.UIContextPayload)
+	ensureBikeLaneOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, s.req.UIContextPayload)
+	ensureGreenStoresOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, s.req.UIContextPayload)
 	rewriteNavigateDashboardsForMapLayerComponents(&payload, accID, s.lastToolResults, lastUser)
 	machineFixUIActions(&payload, s.lastToolResults)
 
@@ -728,14 +1134,18 @@ func (s *aiSession) finalizeAnswerJSON(ctx context.Context, rawAnswer string) st
 		machineFixUIActions(&payload, s.lastToolResults)
 		stripUbikeLayerWhenBikeLaneIntent(&payload, lastUser)
 		rewriteNavigateDashboardsForMapLayerComponents(&payload, accID, s.lastToolResults, lastUser)
-		ensureUbikeOpenMapLayerFromUserQuestion(&payload, lastUser)
-		ensureGenericOpenMapLayerFromUserQuestion(&payload, lastUser, accID)
+		ensureUbikeOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, s.req.UIContextPayload)
+		ensureGenericOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, accID, s.req.UIContextPayload)
+		ensureBikeLaneOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, s.req.UIContextPayload)
+		ensureGreenStoresOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, s.req.UIContextPayload)
 		rewriteNavigateDashboardsForMapLayerComponents(&payload, accID, s.lastToolResults, lastUser)
 		machineFixUIActions(&payload, s.lastToolResults)
 		if remain := uiActionsViolations(&payload); len(remain) > 0 {
 			logs.FInfo("ui_actions violations after repair: %v", remain)
 		}
 	}
+
+	enrichReplyWithMapLayerDataScopeNote(&payload)
 
 	out, err := json.Marshal(payload)
 	if err != nil {
@@ -751,8 +1161,8 @@ func normalizeAIAnswerLegacy(rawAnswer string) string {
 		return rawAnswer
 	}
 
-	var payload normalizedAIResponse
-	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+	payload, err := parseNormalizedAIResponseFlexible(trimmed)
+	if err != nil {
 		return rawAnswer
 	}
 	if payload.UIActions == nil {

@@ -127,6 +127,7 @@ func (s *aiSession) generate(ctx context.Context) error {
 	}
 
 	for i := 0; i <= maxRetry; i++ {
+		s.compressContextIfEstimatedTokensReachBudget()
 		s.lastResp, s.lastErr = twccModel.GenerateContent(ctx, s.currentMessages, s.options...)
 		if s.lastErr == nil {
 			s.updateTokens()
@@ -168,55 +169,80 @@ func parseAIAccountID(userID string) int {
 
 func (s *aiSession) executeTools(ctx context.Context, toolCalls []llms.ToolCall) error {
 	choice := s.lastResp.Choices[0]
-	
-	// Add Assistant's intent
+
+	assistText := choice.Content
+	if s.estimatedContextTokens() >= contextCompressThresholdTokens() {
+		assistText = truncateAssistantPrefaceForTools(choice.Content, 1200)
+	}
 	s.currentMessages = append(s.currentMessages, llms.MessageContent{
 		Role:  llms.ChatMessageTypeAI,
-		Parts: append([]llms.ContentPart{llms.TextContent{Text: choice.Content}}, toolsToParts(toolCalls)...),
+		Parts: append([]llms.ContentPart{llms.TextContent{Text: assistText}}, toolsToParts(toolCalls)...),
 	})
 
 	toolCtx := tools.WithAccountID(ctx, parseAIAccountID(s.req.UserID))
 	toolCtx = tools.WithUIContextPayload(toolCtx, s.req.UIContextPayload)
-	orderedCalls := prioritizeToolCallsForContextUbike(toolCalls)
+	orderedCalls := prioritizeToolCallsForContextGeoNearby(toolCalls)
 	for _, tc := range orderedCalls {
 		s.executedTools = append(s.executedTools, tc.FunctionCall.Name)
 		result := ""
-		args := tc.FunctionCall.Arguments
-		if tc.FunctionCall.Name == "get_nearby_ubike_summary" {
-			args = patchNearbyUbikeArgsFromUISnapshot(
+		args, argsRepaired := repairToolCallArguments(tc.FunctionCall.Name, tc.FunctionCall.Arguments, s.req)
+		if argsRepaired {
+			logs.FInfo("tool args repair applied: %s", tc.FunctionCall.Name)
+		}
+		skipExecute := false
+		if tc.FunctionCall.Name == "get_current_ui_context" {
+			u := lastUserTextFromMessages(s.req.Messages)
+			if !userMessageWarrantsGetCurrentUIContext(u) {
+				result = `{"error":"ui_context_blocked","message_zh":"使用者未詢問目前畫面、頁面、地圖視窗、已開圖層或「我在哪」等介面／定位情境；已阻擋 get_current_ui_context。請改用 resolve_navigation_target、get_component_facts、get_dashboard_component_summary 取得資料；延續上一則主題時請依對話與工具結果作答，勿改讀目前 UI。"}`
+				skipExecute = true
+			}
+		}
+		if tc.FunctionCall.Name == "get_geo_nearby_for_component" {
+			var blocked string
+			args, blocked = resolveGeoNearbyArgsOrNoGPS(
 				s.lastToolResults["get_current_ui_context"],
 				s.req.UIContextPayload,
 				args,
+				s.lastToolResults["resolve_coordinates_zh"],
 			)
+			if blocked != "" {
+				result = blocked
+				skipExecute = true
+			}
 		}
-		if !tools.Exists(tc.FunctionCall.Name) {
-			result = fmt.Sprintf("Error: tool %s is not a backend tool. Do not call it as a tool. If it is an UI action (navigate_dashboard, open_component_info, switch_city, open_map_layer), place it in final JSON field ui_actions instead.", tc.FunctionCall.Name)
-			logs.FError("Tool Error: tool %s not found", tc.FunctionCall.Name)
-		} else {
-			var err error
-			result, err = tools.Execute(toolCtx, tc.FunctionCall.Name, args)
-			if err != nil {
-				result = fmt.Sprintf("Error: %v. Please verify arguments.", err)
-				logs.FError("Tool Error: %v", err)
+		if !skipExecute {
+			if !tools.Exists(tc.FunctionCall.Name) {
+				result = fmt.Sprintf("Error: tool %s is not a backend tool. Do not call it as a tool. If it is an UI action (navigate_dashboard, open_component_info, switch_city, open_map_layer), place it in final JSON field ui_actions instead.", tc.FunctionCall.Name)
+				logs.FError("Tool Error: tool %s not found", tc.FunctionCall.Name)
+			} else {
+				var err error
+				result, err = tools.Execute(toolCtx, tc.FunctionCall.Name, args)
+				if err != nil {
+					result = fmt.Sprintf("Error: %v. Please verify arguments.", err)
+					logs.FError("Tool Error: %v", err)
+				}
 			}
 		}
 		s.lastToolResults[tc.FunctionCall.Name] = result
 
+		llmToolContent := s.compactToolResultForLLMChain(ctx, tc.FunctionCall.Name, result)
 		s.currentMessages = append(s.currentMessages, llms.MessageContent{
 			Role: llms.ChatMessageTypeTool,
 			Parts: []llms.ContentPart{llms.ToolCallResponse{
-				ToolCallID: tc.ID, Name: tc.FunctionCall.Name, Content: result,
+				ToolCallID: tc.ID, Name: tc.FunctionCall.Name, Content: llmToolContent,
 			}},
 		})
 	}
+	s.compressContextIfEstimatedTokensReachBudget()
 	return nil
 }
 
 func (s *aiSession) forceFinalJSONResponse(ctx context.Context) {
+	s.compressContextIfEstimatedTokensReachBudget()
 	s.currentMessages = append(s.currentMessages, llms.MessageContent{
 		Role: llms.ChatMessageTypeSystem,
 		Parts: []llms.ContentPart{
-			llms.TextContent{Text: "Stop calling tools. Now produce final answer only. Return strict JSON with keys reply and ui_actions. ui_actions can only include: navigate_dashboard, open_component_info, switch_city, open_map_layer."},
+			llms.TextContent{Text: "Stop calling tools. Now produce final answer only. Return strict JSON with keys reply and ui_actions. ui_actions can only include: navigate_dashboard, open_component_info, switch_city, open_map_layer. reply MUST use real numbers and units from tool results above when tools returned data; if tools failed, say so honestly—do not invent statistics."},
 		},
 	})
 	resp, err := twccModel.GenerateContent(
@@ -235,12 +261,17 @@ func (s *aiSession) forceFinalJSONResponse(ctx context.Context) {
 func (s *aiSession) injectInstructions() {
 	toolNames := ""
 	for i, t := range s.callOpts.Tools {
-		if i > 0 { toolNames += ", " }
+		if i > 0 {
+			toolNames += ", "
+		}
 		toolNames += t.Function.Name
 	}
 
-	instruction := fmt.Sprintf("\nSystem Instruction:\n1. Use ONLY: [%s].\n2. NEVER nest tool calls \n3. Arguments MUST be literal values (strings, integers, etc.), never function calls \n4. For dependent tasks, call tools sequentially in separate turns.\n5. If stuck, respond with text.", toolNames)
-	
+	instruction := fmt.Sprintf(
+		"\nSystem Instruction:\n1. Use ONLY: [%s].\n2. NEVER nest tool calls \n3. Arguments MUST be literal values (strings, integers, etc.), never function calls \n4. For dependent tasks, call tools sequentially in separate turns.\n5. If stuck, respond with text.\n6. For ANY statistics/metrics/trends/summary/compare question: you MUST answer ONLY from successful tool outputs. reply MUST quote concrete numbers, years, and units from chart_preview / summaries. NEVER invent figures, NEVER answer with generic outlines (e.g. \"includes daily waste, recycling…\") without actual values from tools.\n7. If a tool returns Error or empty data: state that clearly in reply; do NOT fabricate numbers or filler summaries.\n8. For get_dashboard_component_summary, dashboard_index MUST be a real string from resolve_navigation_target or manifest (e.g. environment_dashboard). NEVER use placeholders like {result1} or made-up tokens.\n9. Do NOT call get_current_ui_context unless the user's latest message clearly refers to the current screen, dashboard page, map view, open layers, or location (where am I). Backend may block that tool otherwise.",
+		toolNames,
+	)
+
 	s.currentMessages = make([]llms.MessageContent, 0)
 	merged := false
 	for _, m := range s.req.Messages {
@@ -251,10 +282,10 @@ func (s *aiSession) injectInstructions() {
 			s.currentMessages = append(s.currentMessages, m)
 		}
 	}
-	
+
 	if !merged {
 		s.currentMessages = append([]llms.MessageContent{{
-			Role: llms.ChatMessageTypeSystem,
+			Role:  llms.ChatMessageTypeSystem,
 			Parts: []llms.ContentPart{llms.TextContent{Text: "Instruction: Use tools: [" + toolNames + "]."}},
 		}}, s.currentMessages...)
 	}
@@ -341,7 +372,9 @@ func (s *aiSession) buildFallbackJSONAnswer() string {
 
 func toolsToParts(calls []llms.ToolCall) []llms.ContentPart {
 	parts := make([]llms.ContentPart, len(calls))
-	for i, c := range calls { parts[i] = c }
+	for i, c := range calls {
+		parts[i] = c
+	}
 	return parts
 }
 
@@ -359,16 +392,21 @@ func mergeSystemMsg(m llms.MessageContent, instruction string) llms.MessageConte
 
 func extractText(m llms.MessageContent) string {
 	for _, p := range m.Parts {
-		if t, ok := p.(llms.TextContent); ok { return t.Text }
+		if t, ok := p.(llms.TextContent); ok {
+			return t.Text
+		}
 	}
 	return ""
 }
 
 func parseUsageInt(val interface{}) int {
 	switch v := val.(type) {
-	case int: return v
-	case float64: return int(v)
-	default: return 0
+	case int:
+		return v
+	case float64:
+		return int(v)
+	default:
+		return 0
 	}
 }
 

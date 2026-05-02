@@ -17,7 +17,7 @@ const contentStore = useContentStore();
 const authStore = useAuthStore();
 const { addChatData, addQueryData, saveChatLog } = chatStore;
 const { createDashboard } = contentStore;
-const { chatData } = storeToRefs(chatStore);
+const { chatData, isAwaitingBotReply } = storeToRefs(chatStore);
 const { editDashboard } = storeToRefs(contentStore);
 const { user } = storeToRefs(authStore);
 
@@ -65,7 +65,7 @@ const qaBtnHandler = async (text, relations) => {
 };
 
 const sendBtnHandler = (text) => {
-	if (!text.trim()) return;
+	if (!text.trim() || isAwaitingBotReply.value) return;
 	addQueryData({
 		role: "user",
 		content: text,
@@ -77,16 +77,22 @@ const toggleSticky = () => {
 	isStickyOpen.value = !isStickyOpen.value;
 };
 
+const scrollChatToBottom = async () => {
+	await nextTick();
+	const chat = chatAreaRef.value;
+	if (!chat) return;
+	chat.scrollTop = chat.scrollHeight - chat.clientHeight;
+};
+
 watch(
 	() => chatData.value.length,
-	async () => {
-		await nextTick();
-		const chat = chatAreaRef.value;
-		if (!chat) return;
-		chat.scrollTop = chat.scrollHeight - chat.clientHeight;
-	},
+	scrollChatToBottom,
 	{ deep: true },
 );
+
+watch(isAwaitingBotReply, (pending) => {
+	if (pending) scrollChatToBottom();
+});
 </script>
 
 <template>
@@ -214,6 +220,26 @@ watch(
           </div>
         </div>
       </div>
+
+      <!-- 小幫手回覆中（動畫） -->
+      <div
+        v-if="isAwaitingBotReply"
+        class="message"
+      >
+        <div class="bot">
+          <div class="avatar">
+            <BotLogo />
+          </div>
+          <div class="content">
+            <div class="message--bubble message--typing">
+              <span class="typing-dots" aria-hidden="true">
+                <span /><span /><span />
+              </span>
+              <span class="visually-hidden">小幫手正在回覆</span>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- 輸入區 -->
@@ -222,9 +248,14 @@ watch(
         v-model="userMessage"
         type="text"
         placeholder="輸入訊息..."
+        :disabled="isAwaitingBotReply"
         @keyup.enter="sendBtnHandler(userMessage)"
       >
-      <button @click="sendBtnHandler(userMessage)">
+      <button
+        type="button"
+        :disabled="isAwaitingBotReply"
+        @click="sendBtnHandler(userMessage)"
+      >
         <SendIcon />
       </button>
     </div>
@@ -432,6 +463,51 @@ $radius-20: 20px;
 						}
 					}
 
+					.message--typing {
+						min-width: 56px;
+						padding: 14px 18px;
+						display: flex;
+						align-items: center;
+
+						.typing-dots {
+							display: inline-flex;
+							gap: 5px;
+							align-items: center;
+
+							span {
+								width: 7px;
+								height: 7px;
+								border-radius: 50%;
+								background: rgba($white, 0.85);
+								animation: typing-dot 1.2s ease-in-out infinite both;
+
+								&:nth-child(1) {
+									animation-delay: 0s;
+								}
+
+								&:nth-child(2) {
+									animation-delay: 0.15s;
+								}
+
+								&:nth-child(3) {
+									animation-delay: 0.3s;
+								}
+							}
+						}
+					}
+
+					.visually-hidden {
+						position: absolute;
+						width: 1px;
+						height: 1px;
+						padding: 0;
+						margin: -1px;
+						overflow: hidden;
+						clip: rect(0, 0, 0, 0);
+						white-space: nowrap;
+						border: 0;
+					}
+
 					.message--button {
 						display: flex;
 						gap: 0.5rem;
@@ -490,6 +566,19 @@ $radius-20: 20px;
 				filter: brightness(0.5);
 			}
 		}
+	}
+}
+
+@keyframes typing-dot {
+	0%,
+	80%,
+	100% {
+		opacity: 0.35;
+		transform: translateY(0);
+	}
+	40% {
+		opacity: 1;
+		transform: translateY(-4px);
 	}
 }
 </style>

@@ -12,10 +12,29 @@ const AGENT_TOOLS = [
 		function: {
 			name: "get_current_ui_context",
 			description:
-				"Returns the user's current frontend UI snapshot as JSON: route, current dashboard index/name/city/mode, components on screen, sidebar hints, mapview_layer_catalog, component_routing_digest, visible map layers, optional user_location. Call ONLY when the answer depends on where the user is now or what they see (e.g. 'this page', 'here', 'what layer is on', current map). Skip for generic facts that resolve_navigation_target or get_component_facts alone can answer.",
+				"ONLY when the user explicitly asks about the current screen/page, map view, open layers, or \"where am I\" / device location—not for general statistics or follow-ups like \"give me numbers\". Returns compact ui_context JSON; backend adds map_context.reverse_geocode when user_location exists. For index lookup or chart data use resolve_navigation_target / get_component_facts / get_dashboard_component_summary instead. Calling without clear UI intent may be blocked server-side.",
 			parameters: {
 				type: "object",
 				properties: {},
+			},
+		},
+	},
+	{
+		type: "function",
+		function: {
+			name: "resolve_coordinates_zh",
+			description:
+				"Forward geocode for Taiwan: converts a place name or address to WGS84 lat/lng (OpenStreetMap Nominatim). Use when the user names a specific location (not \"here\"/current GPS). Then call get_geo_nearby_for_component with location_anchor explicit and those coordinates; same-turn parallel calls are OK—backend injects coords from this tool if geo args use 0.",
+			parameters: {
+				type: "object",
+				properties: {
+					query: {
+						type: "string",
+						description:
+							"Landmark, district, or address e.g. 台北101、信義區市政府、新北板橋車站",
+					},
+				},
+				required: ["query"],
 			},
 		},
 	},
@@ -38,18 +57,39 @@ const AGENT_TOOLS = [
 	{
 		type: "function",
 		function: {
-			name: "get_nearby_ubike_summary",
+			name: "get_geo_nearby_for_component",
 			description:
-				"Get nearby YouBike stations by latitude/longitude. When get_current_ui_context is used in the same turn, you MUST use map_context.user_location from that tool result for latitude/longitude (do not guess or use landmark defaults). Call get_current_ui_context first in a separate tool round if needed; do not invent coordinates.",
+				"Proximity search for components with geo_nearby_supported. NOT for “how many X in the whole district/city”—that needs get_component_facts (chart). This tool always counts points within radius_meters of one anchor (GPS or geocoded place). Two modes: (1) location_anchor user_device (default)—browser GPS from ui_context overwrites lat/lng; use for 我附近／這裡. (2) location_anchor explicit—uses lat/lng for a named place; call resolve_coordinates_zh first or pass known coordinates; never invent. YouBike responses include query_location_description when relevant; map_geojson returns interpretation_hint_zh—read it. Geojson uses merged Taipei+New Taipei layers where applicable. See manifest geo_nearby_supported.",
 			parameters: {
 				type: "object",
 				properties: {
-					latitude: { type: "number", description: "User latitude in WGS84" },
-					longitude: { type: "number", description: "User longitude in WGS84" },
+					location_anchor: {
+						type: "string",
+						enum: ["user_device", "explicit"],
+						description:
+							"user_device: use device GPS (default). explicit: query at given latitude/longitude (foreign-named location).",
+					},
+					component_index: {
+						type: "string",
+						description:
+							"English component index e.g. green_stores, youbike_availability, bike_network — must match the topic.",
+					},
+					component_id: { type: "integer", description: "Optional alternative to component_index" },
+					city: { type: "string", description: "taipei or metrotaipei — DB row scope for the component" },
+					latitude: {
+						type: "number",
+						description:
+							"With user_device: placeholder OK (server overwrites). With explicit: real WGS84 lat from resolve_coordinates_zh or known coords.",
+					},
+					longitude: {
+						type: "number",
+						description:
+							"With user_device: placeholder OK. With explicit: real WGS84 lon.",
+					},
 					radius_meters: { type: "integer", description: "Search radius in meters, default 500" },
-					top_n: { type: "integer", description: "How many nearest stations to return, default 5" },
+					top_n: { type: "integer", description: "Nearest N items to list, default 5" },
 				},
-				required: ["latitude", "longitude"],
+				required: ["city", "latitude", "longitude"],
 			},
 		},
 	},
@@ -81,7 +121,7 @@ const AGENT_TOOLS = [
 		function: {
 			name: "resolve_navigation_target",
 			description:
-				"Look up component_index / dashboard_index from Chinese or English name fragments and optional city (taipei/metrotaipei). Same visibility as user sidebar. Use when unsure of exact index.",
+				"Look up component_index / dashboard_index from Chinese or English name fragments and optional city (taipei/metrotaipei). Same visibility as user sidebar. Use when unsure of exact index. For topic-based dashboard routing (e.g. 環保／環境／交通／長照), call with kind \"dashboard\" or \"all\" so dashboard_matches lists the board index before you navigate.",
 			parameters: {
 				type: "object",
 				properties: {
@@ -110,7 +150,24 @@ const ALLOWED_UI_ACTIONS = {
 const normalizeUIActions = (actions) => {
 	let candidates = [];
 	if (Array.isArray(actions)) {
-		candidates = actions;
+		const expanded = [];
+		for (let i = 0; i < actions.length; i++) {
+			const el = actions[i];
+			if (
+				typeof el === "string" &&
+				ALLOWED_UI_ACTIONS[el] &&
+				i + 1 < actions.length &&
+				actions[i + 1] &&
+				typeof actions[i + 1] === "object" &&
+				!Array.isArray(actions[i + 1])
+			) {
+				expanded.push({ type: el, params: { ...actions[i + 1] } });
+				i++;
+				continue;
+			}
+			expanded.push(el);
+		}
+		candidates = expanded;
 	} else if (actions && typeof actions === "object") {
 		if (actions.type) {
 			candidates = [actions];
@@ -123,13 +180,14 @@ const normalizeUIActions = (actions) => {
 	return candidates
 		.map((action) => {
 			if (!action || typeof action !== "object") return null;
-			const type = action.type;
+			const type =
+				action.type || action.action || action.function_name;
 			if (!type) return null;
 			if (action.params && typeof action.params === "object") {
 				return { type, params: action.params };
 			}
 			// Compatibility: some LLM replies place params at top level.
-			const { type: _type, ...rest } = action;
+			const { type: _type, action: _a, ...rest } = action;
 			return { type, params: rest };
 		})
 		.filter(Boolean);
@@ -163,8 +221,61 @@ const firstNonEmptyParam = (...vals) => {
 	return "";
 };
 
-/** 與後端 GetComponentRoutingManifest 對齊之精簡表，供 prompt 與執行 ui_actions 前修正導航。 */
-const MAX_ROUTING_DIGEST = 500;
+/** 與後端 GetComponentRoutingManifest 對齊之精簡表（條目數上限；越小越省模型上下文）。 */
+const MAX_ROUTING_DIGEST = 120;
+/** mapview_layer_catalog 最多送入筆數（每輪 tool／請求會重複附帶 ui_context）。 */
+const MAX_MAPVIEW_LAYER_CATALOG = 24;
+/** 全站 component_index|city|dashboard 索引字元上限（system 內嵌）。 */
+const MAX_SITE_CATALOG_CHARS = 10000;
+
+/** 與 digest／全站目錄一致：優先非 map-layers-* 的側欄儀表板。 */
+const pickPreferredDashboardFromPlacements = (placements) => {
+	const pl = placements || [];
+	if (!pl.length) return null;
+	return (
+		pl.find(
+			(p) =>
+				p?.dashboard_index &&
+				!normalizeText(p.dashboard_index).includes("map-layers"),
+		) || pl[0]
+	);
+};
+
+const buildCompactSiteComponentCatalog = (components, maxChars) => {
+	if (!Array.isArray(components) || components.length === 0) {
+		return { text: "", truncated: false, totalLines: 0, shownLines: 0 };
+	}
+	const lines = [];
+	for (const e of components) {
+		const preferred = pickPreferredDashboardFromPlacements(e.placements);
+		const dash = preferred?.dashboard_index || "";
+		const ci = String(e.component_index || "").trim();
+		const city = String(e.city || "").trim();
+		if (!ci || !city || !dash) continue;
+		lines.push(`${ci}|${city}|${dash}`);
+	}
+	const unique = [...new Set(lines)].sort();
+	const totalLines = unique.length;
+	let text = unique.join("\n");
+	let truncated = false;
+	let shownLines = totalLines;
+	const footer = (n, total) =>
+		`\n…(全站共${total}筆，此處僅列前${n}筆以省 token；其餘請 resolve_navigation_target)`;
+	if (text.length > maxChars) {
+		truncated = true;
+		let lo = 0;
+		let hi = unique.length;
+		while (lo < hi) {
+			const mid = Math.floor((lo + hi + 1) / 2);
+			const chunk = unique.slice(0, mid).join("\n");
+			if (chunk.length + footer(mid, totalLines).length <= maxChars) lo = mid;
+			else hi = mid - 1;
+		}
+		shownLines = lo;
+		text = unique.slice(0, lo).join("\n") + footer(lo, totalLines);
+	}
+	return { text, truncated, totalLines, shownLines };
+};
 
 const buildRoutingDigestFromAPIComponents = (components) => {
 	if (!Array.isArray(components)) return [];
@@ -172,22 +283,26 @@ const buildRoutingDigestFromAPIComponents = (components) => {
 	for (const e of components) {
 		const pl = e.placements || [];
 		if (!pl.length) continue;
-		const preferred =
-			pl.find(
-				(p) =>
-					p?.dashboard_index &&
-					!normalizeText(p.dashboard_index).includes("map-layers"),
-			) || pl[0];
+		const preferred = pickPreferredDashboardFromPlacements(pl);
 		if (!preferred?.dashboard_index) continue;
-		out.push({
+		const row = {
 			component_index: e.component_index,
 			name: e.name,
 			city: e.city,
 			has_map_layer: !!e.has_map_layer,
 			preferred_dashboard_index: preferred.dashboard_index,
 			preferred_navigate_city: e.city,
-			placement_dashboard_indexes: pl.map((p) => p.dashboard_index).filter(Boolean),
-		});
+		};
+		if (e.geo_nearby_supported != null) {
+			row.geo_nearby_supported = !!e.geo_nearby_supported;
+			if (e.geo_nearby_provider)
+				row.geo_nearby_provider = String(e.geo_nearby_provider);
+		}
+		const placeIdx = [
+			...new Set(pl.map((p) => p.dashboard_index).filter(Boolean)),
+		].slice(0, 8);
+		if (placeIdx.length) row.placement_dashboard_indexes = placeIdx;
+		out.push(row);
 		if (out.length >= MAX_ROUTING_DIGEST) break;
 	}
 	return out;
@@ -338,6 +453,7 @@ const isUbikeKeyword = (value) => {
 	if (!text) return false;
 	if (isBikeLaneInfrastructureIntent(value)) return false;
 	return (
+		text.includes("ubkie") ||
 		text.includes("ubike") ||
 		text.includes("youbike") ||
 		text.includes("微笑單車") ||
@@ -491,7 +607,7 @@ const buildComponentIdLookupFromStore = (contentStore) => {
 	return Object.keys(byId).length ? byId : null;
 };
 
-const enrichComponentIdsForAgent = (componentIds, lookup, maxItems = 80) => {
+const enrichComponentIdsForAgent = (componentIds, lookup, maxItems = 16) => {
 	if (!lookup || !Array.isArray(componentIds)) return undefined;
 	const slice = componentIds.slice(0, maxItems);
 	return slice.map((id) => {
@@ -506,7 +622,7 @@ const enrichComponentIdsForAgent = (componentIds, lookup, maxItems = 80) => {
 	});
 };
 
-/** 側欄：各城市儀表板清單（component_ids 為後端整數；若有 components_with_index 則已對應 index／city） */
+/** 側欄：各城市儀表板清單（精簡：不附完整 component_ids 陣列以省 token；詳情用 digest／resolve） */
 const buildSidebarCatalogForAgent = (contentStore) => {
 	const cities =
 		contentStore.cityManager?.activeCities?.length > 0
@@ -521,10 +637,10 @@ const buildSidebarCatalogForAgent = (contentStore) => {
 			const row = {
 				index: d.index || "",
 				name: d.name || "",
-				component_ids,
+				n_components: component_ids.length,
 			};
 			const enriched = enrichComponentIdsForAgent(component_ids, lookup);
-			if (enriched) row.components_with_index = enriched;
+			if (enriched?.length) row.components_with_index = enriched;
 			return row;
 		});
 	}
@@ -613,6 +729,8 @@ export const useChatStore = defineStore('chat', () => {
 	const mapStore = useMapStore();
 
 	const routingManifestDigest = ref([]);
+	/** GET /ai/component-routing-manifest 原始 components（供每則 system 附全站索引） */
+	const routingManifestRawComponents = ref([]);
 	/** 與 manifest 一併下發：各 mapview 儀表板×city 下可 open_map_layer 的組件表 */
 	const agentMapviewLayerCatalog = ref([]);
 	const mapviewLayerCatalogTruncated = ref(false);
@@ -623,13 +741,21 @@ export const useChatStore = defineStore('chat', () => {
 		try {
 			const res = await http.get("/ai/component-routing-manifest");
 			const data = res.data?.data;
+			routingManifestRawComponents.value = Array.isArray(data?.components)
+				? data.components
+				: [];
 			routingManifestDigest.value = buildRoutingDigestFromAPIComponents(
 				data?.components,
 			);
-			agentMapviewLayerCatalog.value = Array.isArray(data?.mapview_layer_catalog)
-				? data.mapview_layer_catalog
-				: [];
-			mapviewLayerCatalogTruncated.value = !!data?.mapview_layer_catalog_truncated;
+			const rawCat = data?.mapview_layer_catalog;
+			if (Array.isArray(rawCat) && rawCat.length > MAX_MAPVIEW_LAYER_CATALOG) {
+				agentMapviewLayerCatalog.value = rawCat.slice(0, MAX_MAPVIEW_LAYER_CATALOG);
+				mapviewLayerCatalogTruncated.value = true;
+			} else {
+				agentMapviewLayerCatalog.value = Array.isArray(rawCat) ? rawCat : [];
+				mapviewLayerCatalogTruncated.value =
+					!!data?.mapview_layer_catalog_truncated;
+			}
 		} catch (e) {
 			console.warn("component-routing-manifest fetch failed", e);
 		} finally {
@@ -676,43 +802,47 @@ export const useChatStore = defineStore('chat', () => {
     	chatData.value.push({ id: chatData.value.length + 1, isDefault: false, ...newChatData });
   	};
 
+	const isAwaitingBotReply = ref(false);
+
   	const addQueryData = async (newChatData) => {
 
     	chatData.value.push({ id: chatData.value.length + 1, isDefault: false, ...newChatData });
-		if (isUbikeKeyword(newChatData.content)) {
-			await requestCurrentLocationForAI();
-		}
-		const aiResponse = await askAgent(newChatData.content);
-		if (aiResponse) {
-			const actionResults = await executeUIActions(
-				aiResponse.ui_actions,
-				newChatData.content,
-			);
-			chatData.value.push({
-				id: chatData.value.length + 1,
-				role: 'bot',
-				isDefault: false,
-				content: aiResponse.reply || aiResponse.raw,
-			});
-			if (actionResults.length > 0) {
+		isAwaitingBotReply.value = true;
+		try {
+			const aiResponse = await askAgent(newChatData.content);
+			if (aiResponse) {
+				const actionResults = await executeUIActions(
+					aiResponse.ui_actions,
+					newChatData.content,
+				);
 				chatData.value.push({
 					id: chatData.value.length + 1,
 					role: 'bot',
 					isDefault: false,
-					content: `已執行操作：\n- ${actionResults.join("\n- ")}`,
+					content: aiResponse.reply || aiResponse.raw,
 				});
+				if (actionResults.length > 0) {
+					chatData.value.push({
+						id: chatData.value.length + 1,
+						role: 'bot',
+						isDefault: false,
+						content: `已執行操作：\n- ${actionResults.join("\n- ")}`,
+					});
+				}
+				saveChatLog(newChatData.content, {
+					reply: aiResponse.reply || aiResponse.raw,
+					ui_actions: aiResponse.ui_actions,
+					action_results: actionResults,
+				});
+				return;
 			}
-			saveChatLog(newChatData.content, {
-				reply: aiResponse.reply || aiResponse.raw,
-				ui_actions: aiResponse.ui_actions,
-				action_results: actionResults,
-			});
-			return;
-		}
 
-		// Reset broken agent session before fallback flow.
-		sessionStorage.removeItem("agentSessionId");
-		await runVectorRecommendation(newChatData.content);
+			// Reset broken agent session before fallback flow.
+			sessionStorage.removeItem("agentSessionId");
+			await runVectorRecommendation(newChatData.content);
+		} finally {
+			isAwaitingBotReply.value = false;
+		}
   	};
 
 	const requestCurrentLocationForAI = async () => {
@@ -737,6 +867,15 @@ export const useChatStore = defineStore('chat', () => {
 				}
 			);
 		});
+	};
+
+	const snapshotUserLocationForAgent = () => {
+		const u = mapStore.userLocation;
+		if (!u) return null;
+		const { latitude: lat, longitude: lng } = u;
+		if (typeof lat !== "number" || typeof lng !== "number") return null;
+		if (Number.isNaN(lat) || Number.isNaN(lng)) return null;
+		return { latitude: lat, longitude: lng };
 	};
 
 	const buildUIContext = () => ({
@@ -768,17 +907,30 @@ export const useChatStore = defineStore('chat', () => {
 		 */
 		thematic_map_component_indexes_loaded: buildThematicLayerIndexesHint(
 			contentStore,
-		),
+		).slice(0, 24),
 		map_context: {
 			visible_layers: mapStore.currentVisibleLayers || [],
-			user_location: mapStore.userLocation || null,
+			user_location: snapshotUserLocationForAgent(),
 		},
 	});
 
 	const askAgent = async (question) => {
 		try {
 			await ensureRoutingManifestDigest();
+			// 每次送 AI 前更新 GPS，讓 ui_context.map_context.user_location 與後端 geo／反向地理一致；
+			// 僅 YouBike 關鍵字才請定位會導致「我在哪」等題永遠拿不到座標。
+			await requestCurrentLocationForAI();
 			const uiContext = buildUIContext();
+			const siteCat = buildCompactSiteComponentCatalog(
+				routingManifestRawComponents.value,
+				MAX_SITE_CATALOG_CHARS,
+			);
+			const siteCatalogBlock = siteCat.text
+				? `【全站組件索引】使用者可見範圍內，每行格式為 component_index|city|dashboard_index（city 僅 taipei／metrotaipei；dashboard_index 為 navigate_dashboard／開地圖建議對齊之儀表板；同一組件若兩區皆有資料會各一行）。${siteCat.truncated ? `已截斷（列${siteCat.shownLines}/${siteCat.totalLines}筆）。` : `共${siteCat.totalLines}筆。`}
+${siteCat.text}`
+				: routingManifestRawComponents.value.length > 0
+					? `【全站組件索引】無法產生縮寫列（請 resolve_navigation_target）。`
+					: `【全站組件索引】尚未載入（請仍可用 resolve_navigation_target 依關鍵字查詢）。`;
 			const storedSession = sessionStorage.getItem("agentSessionId");
 			const response = await http.post("/ai/chat/twai", {
 				session: storedSession || "",
@@ -787,30 +939,22 @@ export const useChatStore = defineStore('chat', () => {
 				messages: [
 					{
 						role: "system",
-						content: `你是臺北城市儀表板 agent。請優先使用工具回覆資料型問題，引用工具結果，不要臆測。
-你可建議 UI 操作，但只能使用以下 action type：navigate_dashboard、open_component_info、switch_city、open_map_layer。
-若使用者明確要「前往/切換/打開某個儀表板／地圖頁」，必須回傳對應 navigate_dashboard（或搭配 open_map_layer）；僅詢問統計或文字說明時不得為滿足此規則而強制導覽。
-請以 JSON 回覆，格式必須是：{"reply":"文字回覆","ui_actions":[{"type":"action_type","params":{...}}]}。
-若不需要操作，ui_actions 請回傳空陣列。
-工具參數 city 僅可使用小寫：taipei 或 metrotaipei。
-【介面快照】路由、目前儀表板、側欄、地圖可見層、定位、digest、catalog 等完整 JSON 須透過工具 get_current_ui_context（無參數）取得；與 GET /ai/component-routing-manifest 內 mapview_layer_catalog_note 之語意一致。僅在問題依賴「目前頁／畫面上有什麼／已開圖層／定位」時呼叫；純名稱／index 不確定時優先 resolve_navigation_target。工具若回 error（未附 ui_context）依錯誤提示處理。
-【get_current_ui_context 欄位速覽（mapview_layer_catalog_truncated 或 component_routing_digest_truncated 為 true 時，未列項目一律改 resolve_navigation_target）】
-• mapview_layer_catalog：每筆 dashboard_index + mapview_city = 一個 mapview URL 情境；openable_layers 為該板側欄可開之圖層（component_index、中文 name、open_map_layer 之 component_city）。開層前 navigate_dashboard 須對齊該組 index、city、mode=mapview。
-• component_routing_digest：側欄可見組件彙總（component_index、city、has_map_layer、preferred_dashboard_index 開圖層建議板且已避開 map-layers-*、placement_dashboard_indexes）。
-• current_dashboard_components：僅「目前畫面」儀表板已載入組件之 index／name／city／has_map_layer（換頁即變）。
-• sidebar_by_city：儀表板 index／name／component_ids；有 components_with_index 才有 component_index。
-• thematic_map_component_indexes_loaded：僅 map-layers-* 圖資頁主題層；不可替代 digest 決定一般組件應開在哪個板，勿僅因在此列表就 navigate 到 map-layers。
-• map_context.visible_layers／user_location：目前地圖已開層與定位（YouBike 附近站點見下）。
-【說明／資訊類問題】問「資訊／說明／有哪些／統計／分布」等除非確定無資料，須先工具查詢再在 reply 摘要重點；禁空話導覽。建議：resolve_navigation_target → get_component_facts 或 get_dashboard_component_summary；無結果時 reply 明說並建議換關鍵字。僅在使用者明確「帶我去／打開／切換」時才填 navigate_dashboard／open_map_layer。
-【區域／城市】使用者未明確指定僅「臺北市」或僅「雙北／北北基／新北」等範圍時，若該組件經工具確認同時存在 taipei 與 metrotaipei 資料，應依規定分次呼叫 get_component_facts（city 先後為 taipei、metrotaipei），並在 reply 「並列」兩區重點；每一組數字、年份區間或趨勢都須緊鄰標示來自「臺北市（taipei）」或「雙北—臺北市與新北市合計／行政區劃範圍依平台定義（metrotaipei）」，禁止混在同一句而不標區域，亦禁止只引用單一 city 卻未說明另一區是否存在資料。使用者已明確只要其中一區時，僅摘要該區並開頭標示區域名稱即可。
-【綜合分析／多組件】使用者若要求「結合／整合／統整／意味著什麼／有什麼關聯／一起解讀／用實際數據回答」，或點名整板儀表板（例：長照關懷所有資訊、這一頁所有組件），必須以工具結果中的數字作答，不可只用組件 use_case／short_desc 套話或介紹儀表板功能代答。
-(1) 儀表板與範圍：優先 get_current_ui_context 取得 current_dashboard.index 與 city；必要時 resolve_navigation_target kind=dashboard。
-(2) 資料一次拉齊：優先 get_dashboard_component_summary，帶齊 dashboard_index、city，max_components 設 10（或該板實際組件數）；使用者若只點名部分組件，傳 component_indexes（英文 component_index 陣列）篩選。同一題若需臺北與雙北並列，依【區域／城市】分兩次呼叫（不同 city），再綜合。
-(3) reply 結構（使用者問「分析／意味著／帶給我們什麼訊息」時為強制）：①「數據摘錄」—依組件逐段列出工具 JSON 可核對的數值，須標組件名、區域，有時間序列則標年份（不可把不同組件、不同年份的數字混在一起卻不註明）；②「綜合解讀」—須另起一段或多段，**不得**只用換句話重述①的數字當作分析；必須明確回答「這些指標一起看，傳達了什麼訊息」，且內容只能由①已出現的數據推論，並至少包含：**(a)** 兩項以上指標的**對照**（例如扶養負擔與老化程度是否同向、與就業年齡結構變化是否一致或形成張力）；**(b)** 若有多個年度，簡述**趨勢**與對長照／勞動力寓意的白話涵義；**(c)** 若有行政區／分區統計，簡述**空間差異**代表什麼（何區幼年或高齡人口相對突出、對資源配置可能的啟示）。篇幅上「綜合解讀」應明顯多於單純摘錄句。③ 嚴禁離題：未問交通／定位時，不得用 YouBike、自行車道、或「系統會提供哪些服務」等填充分析。
-【只要資訊 vs 要開地圖】僅要數據／說明時 ui_actions 可 []。使用者要求看地圖／圖層／地圖模式時：navigate_dashboard.params.mode 必為字串 "mapview"（省略則成一般儀表板、非全幅地圖頁），並 open_map_layer（或 navigate 同帶 map_layer_component_index）；通常先對齊正確儀表板 mapview 再開層。
-【YouBike】附近站點／可借數：一律先 get_current_ui_context，再以回傳之 map_context.user_location 經緯度呼叫 get_nearby_ubike_summary（禁止並行、禁止臆測座標或套用景點預設點）；無定位則請使用者開定位，勿捏造距離。僅回答「資訊／附近／有多少」時 ui_actions 必為 []，不得 navigate_dashboard／open_map_layer。若使用者明確要看地圖／圖層／在地圖上找站點，才可 navigate practical_transportation_newtpe + metrotaipei + mode=mapview，並 open_map_layer youbike_availability；文字回覆仍勿導向「圖資」或 map-layers-taipei／map-layers-metrotaipei。
-【自行車道／路網】為車道／路線主題，非 YouBike 站位；用 resolve_navigation_target 找 component_index，勿與 youbike_availability 混淆。
-【導覽】不必背 index：(1) resolve_navigation_target；(2) 或 ui_actions params 給 component_name／name／dashboard_name + city，後端會比對側欄補齊 index／component_index。仍應盡量給正確 taipei／metrotaipei。資料細節用 get_component_facts、get_dashboard_component_summary；介面細節按需 get_current_ui_context。`,
+						content: `你是臺北城市儀表板 agent。
+${siteCatalogBlock}
+
+【核心】凡詢問統計、指標、趨勢、整理、比較、雙北／單一縣市資料者，皆視為資料題：必呼叫工具取得資料後再作答；禁止憑常識、臆測或僅列指標名搪塞。reply 只能依工具成功回傳之內容撰寫，須寫出 chart_preview／彙總內的具體數字、年份與單位；禁止只複製 short_desc、禁止「某某包括…等」式空泛總覽而無實際數值。若工具失敗、報錯或查無資料，reply 須誠實說明原因並請使用者換問法或稍後再試，禁止捏造數字。get_dashboard_component_summary 的 dashboard_index 必須來自 resolve_navigation_target（或 manifest／digest 中的真實 index 字串），絕對禁止填占位符、變數名或諸如「結果1／{結果1}」等非真實 index。回覆 JSON：{"reply":"…","ui_actions":[…]}；不需操作則 ui_actions=[]。city 僅 taipei／metrotaipei。
+【UI】僅用 navigate_dashboard、open_component_info、switch_city、open_map_layer。除下列「主題同步」外：使用者明確說「前往／打開／切到／看哪一頁」才需 navigate／open_map_layer。
+【主題同步畫面】當使用者以領域／主題／某類統計發問或延續該主題（例如環保統計、環境指標、交通景況、長照／社福），且 resolve_navigation_target（建議 kind 含 dashboard）或 sidebar／digest 可對應到**單一明確**的 dashboard_index 時，應在 ui_actions 加入 navigate_dashboard：params.index 為該 dashboard_index，params.city 為該板適用之 taipei／metrotaipei（工具結果 sidebar_source／PickNavigateCity 或 match 列之 city；双北未指定時依該板資料慣用範圍，勿臆造）。使回覆的資料與畫面上的儀表板一致。若無法對應單一儀表板、或使用者明示只要口頭／文字答案不要換頁，則 ui_actions 可為 []。
+【工具選擇】名稱／index 不明→resolve_navigation_target。單組件→get_component_facts；整板／綜合→get_dashboard_component_summary（max_components≤10，可 component_indexes）。get_current_ui_context：僅在使用者明示「目前畫面／這頁／地圖視窗／我在哪／定位／已開圖層」等與介面狀態相關時才可呼叫；一般統計、分析、延續上一則主題的追問（例如「給我實際數字」）一律禁止呼叫，應延續對話主題並用 facts／summary 取數。digest／catalog 若 truncated 則其餘用 resolve。
+【ui_context 欄位（精簡版）】component_routing_digest：組件×city＋has_map_layer＋preferred_dashboard＋geo_nearby_*。mapview_layer_catalog：可 open_map_layer 的板×層。sidebar_by_city：index／name／n_components／components_with_index（無完整 id 清單）。current_dashboard_components：畫面上組件。current_dashboard.city：僅儀表板資料範圍（taipei／metrotaipei），不可當成使用者實際所在縣市。map_context.user_location：GPS。map_context.reverse_geocode：服務端以國土測繪中心村里界查詢附帶之縣市區村里（admin_line 為一行簡述）；「我在哪」類問題必優先照抄 reverse_geocode，禁只用 current_dashboard.city 推測。visible_layers：已開層。thematic_map_*：僅圖資頁，勿當一般導覽唯一依據。
+【雙北】未指定單一城市且組件兩區皆有資料時，分次 get_component_facts（taipei、metrotaipei）；數字旁必標來源口徑，禁混談。
+【綜合分析題】禁套話；摘錄工具數字後須另段「解讀」：指標對照、（若有）年度趨勢、（若有）空間差異；解讀篇幅須大於摘錄。「附近」須延續話題組件，禁無理由改 YouBike。
+【地圖】要看地圖／圖層→mode="mapview"＋open_map_layer（對齊 digest 之板與 city）。
+【綠色商家地圖】凡出現「綠色商家／綠色商店／綠商店＋地圖或圖層」：最後一則回覆**必須**是合法 JSON，且 ui_actions 至少含 open_map_layer（component_index=green_stores、city 依台北／新北或 digest）；禁止只回附近幾家、距離等純文字而無 JSON。可搭配 navigate_dashboard（index=environment_dashboard 等 digest 之板、mode=mapview）以確保地圖頁能開圖層。工具 open_map_layer 若曾呼叫，僅為取得提示，仍須把 open_map_layer 寫入最終 JSON 的 ui_actions。
+【地理鄰近】get_geo_nearby_for_component：僅 geo_nearby_supported；永遠是「單一錨點＋半徑」的點位數，不是「某行政區／全臺共有幾家」—後者用 get_component_facts（圖表彙總）並在 reply 拆兩種口徑。location_anchor：預設 user_device—以瀏覽器 GPS 覆寫經緯度（我附近／這裡）。使用者指明地名、景點、地址時設 explicit：先 resolve_coordinates_zh，再同一輪 geo＋explicit（可並行；座標 0 時後端自 resolve 注入）。無 GPS 且非 explicit 時 error=no_gps。map_geojson 已合併雙北；必讀 interpretation_hint_zh、radius_semantics（半徑內筆數 vs nearest 可能越界）。僅問數量時 ui_actions=[]。
+【YouBike 附近】工具回傳若含 query_location_description：先看頂層 location_anchor。user_device（裝置 GPS）→ 首段才可描述「您／使用者推定所在」（admin_line）。explicit（使用者問某地名／地址）→ admin_line 僅表示該詢問地點錨點所在行政區，首段須用「詢問地點位於…／該一带…」，禁止使用「您位於」「您人在」。再列站點數、最近站與車輛／車位。
+【自行車道 vs YouBike】車道圖資≠YouBike 站位。
+【導覽歧義】resolve_navigation_target 或 ui_actions 帶名稱＋city；細節仍靠 get_component_facts／summary。`,
 					},
 					{
 						role: "user",
@@ -1119,5 +1263,5 @@ export const useChatStore = defineStore('chat', () => {
       	}
 	};
 
-	return { chatData, addChatData, addQueryData, saveChatLog, lastMapLayerAction }
+	return { chatData, isAwaitingBotReply, addChatData, addQueryData, saveChatLog, lastMapLayerAction }
 })

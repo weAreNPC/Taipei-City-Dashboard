@@ -19,9 +19,11 @@ func init() {
 	Register("get_population_summary", GetPopulationSummary)
 	Register("get_component_facts", GetComponentFacts)
 	Register("get_dashboard_component_summary", GetDashboardComponentSummary)
-	Register("get_nearby_ubike_summary", GetNearbyUbikeSummary)
+	Register("get_geo_nearby_for_component", GetGeoNearbyForComponent)
+	Register("resolve_coordinates_zh", ResolveCoordinatesZh)
 	Register("resolve_navigation_target", ResolveNavigationTarget)
 	Register("get_current_ui_context", GetCurrentUIContext)
+	Register("open_map_layer", OpenMapLayer)
 }
 
 // Register adds a tool to the registry

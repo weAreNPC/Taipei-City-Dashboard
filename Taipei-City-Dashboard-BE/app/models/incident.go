@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -88,6 +89,40 @@ func GetLocationData(latitude, longitude float64) (*PlaceResponse, error) {
 		return nil, fmt.Errorf("failed to parse XML: %w", err)
 	}
 
+	return &locationData, nil
+}
+
+// GetLocationDataContext 以國土測繪中心「村里界點位查詢」API（WGS84 經、緯度路徑參數）回傳縣市、鄉鎮市區、段、村里名稱。與 GetLocationData 相同資料源，但支援 context 取消與逾時。
+func GetLocationDataContext(ctx context.Context, latitude, longitude float64) (*PlaceResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	apiURL := fmt.Sprintf(
+		"https://api.nlsc.gov.tw/other/TownVillagePointQuery/%s/%s",
+		strconv.FormatFloat(longitude, 'f', -1, 64),
+		strconv.FormatFloat(latitude, 'f', -1, 64),
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: 8 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to make request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	var locationData PlaceResponse
+	if err := xml.Unmarshal(body, &locationData); err != nil {
+		return nil, fmt.Errorf("failed to parse XML: %w", err)
+	}
 	return &locationData, nil
 }
 

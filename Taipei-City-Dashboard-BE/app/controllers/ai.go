@@ -69,7 +69,7 @@ func GetComponentRoutingManifest(c *gin.Context) {
 		"status": "success",
 		"data": gin.H{
 			"generated_at": time.Now().UTC().Format(time.RFC3339),
-			"note":         "paths 為前端相對路徑（不含網站 origin）。links 以該組件×city 下 placements[0] 的儀表板為例；若同一組件出現在多個儀表板請看 placements。",
+			"note":         "paths 為前端相對路徑（不含網站 origin）。links 以該組件×city 下 placements[0] 的儀表板為例；若同一組件出現在多個儀表板請看 placements。geo_nearby_supported／geo_nearby_provider 由後端依組件 index 與 component_maps（geojson）推導，非獨立設定欄位。",
 			"components":   entries,
 			"mapview_layer_catalog":            mapCatalog,
 			"mapview_layer_catalog_truncated": mapCatTrunc,

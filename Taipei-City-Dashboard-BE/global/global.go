@@ -52,6 +52,12 @@ type TWCCConfig struct {
 	Timeout       int
 	MaxRetry      int
 	MaxConcurrent int
+	// ContextCompressAtEstTokens 粗估「訊息＋工具定義」token 達此值時後端才截短 system／舊 tool（0 或未設＝10000）。
+	ContextCompressAtEstTokens int
+	// ToolResultLLMSummarize 非 0 時：工具回傳超過 ToolResultLLMSummarizeMinBytes 時額外呼叫模型壓縮後再餵給主對話（0＝關閉）。
+	ToolResultLLMSummarize int
+	// ToolResultLLMSummarizeMinBytes 觸發 LLM 壓縮的最小原始字串長度（位元組）；0 或未設＝1024。
+	ToolResultLLMSummarizeMinBytes int
 }
 
 var (
@@ -120,6 +126,9 @@ var (
 		Timeout:       getIntEnv("TWCC_TIMEOUT", 60),
 		MaxRetry:      getIntEnv("TWCC_MAX_RETRY", 2),
 		MaxConcurrent: getIntEnv("TWCC_MAX_CONCURRENT", 100),
+		ContextCompressAtEstTokens: getIntEnv("TWCC_CONTEXT_COMPRESS_AT_ESTIMATED_TOKENS", 10000),
+		ToolResultLLMSummarize:      getIntEnv("TWCC_TOOL_RESULT_LLM_SUMMARIZE", 1),
+		ToolResultLLMSummarizeMinBytes: getIntEnv("TWCC_TOOL_RESULT_LLM_SUMMARIZE_MIN_BYTES", 1024),
 	}
 	
 	LMSession *ort.DynamicSession[int64, float32]
