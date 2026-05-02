@@ -57,13 +57,20 @@ const AGENT_TOOLS = [
 		type: "function",
 		function: {
 			name: "get_dashboard_component_summary",
-			description: "Summarize multiple components in one dashboard.",
+			description:
+				"Fetch chart_preview for multiple components on one dashboard in a single call. Use when the user asks to combine, synthesize, interpret (意味著／統整／整合／實際數據), or the whole board (e.g. 長照關懷所有資訊). Prefer this over many get_component_facts for the same dashboard. Pass max_components=10 to include all typical boards; use optional component_indexes to limit to named components (English index strings).",
 			parameters: {
 				type: "object",
 				properties: {
 					dashboard_index: { type: "string", description: "Dashboard index" },
 					city: { type: "string", description: "taipei or metrotaipei" },
-					max_components: { type: "integer", description: "Max components in summary, up to 10" },
+					max_components: { type: "integer", description: "Cap after filter, up to 10, default 5" },
+					component_indexes: {
+						type: "array",
+						items: { type: "string" },
+						description:
+							"Optional: only these component index strings (e.g. dependency_aging, aging_workforce_trend). Omit to include all components on the dashboard up to max_components.",
+					},
 				},
 				required: ["dashboard_index"],
 			},
@@ -795,6 +802,11 @@ export const useChatStore = defineStore('chat', () => {
 • thematic_map_component_indexes_loaded：僅 map-layers-* 圖資頁主題層；不可替代 digest 決定一般組件應開在哪個板，勿僅因在此列表就 navigate 到 map-layers。
 • map_context.visible_layers／user_location：目前地圖已開層與定位（YouBike 附近站點見下）。
 【說明／資訊類問題】問「資訊／說明／有哪些／統計／分布」等除非確定無資料，須先工具查詢再在 reply 摘要重點；禁空話導覽。建議：resolve_navigation_target → get_component_facts 或 get_dashboard_component_summary；無結果時 reply 明說並建議換關鍵字。僅在使用者明確「帶我去／打開／切換」時才填 navigate_dashboard／open_map_layer。
+【區域／城市】使用者未明確指定僅「臺北市」或僅「雙北／北北基／新北」等範圍時，若該組件經工具確認同時存在 taipei 與 metrotaipei 資料，應依規定分次呼叫 get_component_facts（city 先後為 taipei、metrotaipei），並在 reply 「並列」兩區重點；每一組數字、年份區間或趨勢都須緊鄰標示來自「臺北市（taipei）」或「雙北—臺北市與新北市合計／行政區劃範圍依平台定義（metrotaipei）」，禁止混在同一句而不標區域，亦禁止只引用單一 city 卻未說明另一區是否存在資料。使用者已明確只要其中一區時，僅摘要該區並開頭標示區域名稱即可。
+【綜合分析／多組件】使用者若要求「結合／整合／統整／意味著什麼／有什麼關聯／一起解讀／用實際數據回答」，或點名整板儀表板（例：長照關懷所有資訊、這一頁所有組件），必須以工具結果中的數字作答，不可只用組件 use_case／short_desc 套話或介紹儀表板功能代答。
+(1) 儀表板與範圍：優先 get_current_ui_context 取得 current_dashboard.index 與 city；必要時 resolve_navigation_target kind=dashboard。
+(2) 資料一次拉齊：優先 get_dashboard_component_summary，帶齊 dashboard_index、city，max_components 設 10（或該板實際組件數）；使用者若只點名部分組件，傳 component_indexes（英文 component_index 陣列）篩選。同一題若需臺北與雙北並列，依【區域／城市】分兩次呼叫（不同 city），再綜合。
+(3) reply 結構（使用者問「分析／意味著／帶給我們什麼訊息」時為強制）：①「數據摘錄」—依組件逐段列出工具 JSON 可核對的數值，須標組件名、區域，有時間序列則標年份（不可把不同組件、不同年份的數字混在一起卻不註明）；②「綜合解讀」—須另起一段或多段，**不得**只用換句話重述①的數字當作分析；必須明確回答「這些指標一起看，傳達了什麼訊息」，且內容只能由①已出現的數據推論，並至少包含：**(a)** 兩項以上指標的**對照**（例如扶養負擔與老化程度是否同向、與就業年齡結構變化是否一致或形成張力）；**(b)** 若有多個年度，簡述**趨勢**與對長照／勞動力寓意的白話涵義；**(c)** 若有行政區／分區統計，簡述**空間差異**代表什麼（何區幼年或高齡人口相對突出、對資源配置可能的啟示）。篇幅上「綜合解讀」應明顯多於單純摘錄句。③ 嚴禁離題：未問交通／定位時，不得用 YouBike、自行車道、或「系統會提供哪些服務」等填充分析。
 【只要資訊 vs 要開地圖】僅要數據／說明時 ui_actions 可 []。使用者要求看地圖／圖層／地圖模式時：navigate_dashboard.params.mode 必為字串 "mapview"（省略則成一般儀表板、非全幅地圖頁），並 open_map_layer（或 navigate 同帶 map_layer_component_index）；通常先對齊正確儀表板 mapview 再開層。
 【YouBike】附近站點／可借數：一律先 get_current_ui_context，再以回傳之 map_context.user_location 經緯度呼叫 get_nearby_ubike_summary（禁止並行、禁止臆測座標或套用景點預設點）；無定位則請使用者開定位，勿捏造距離。僅回答「資訊／附近／有多少」時 ui_actions 必為 []，不得 navigate_dashboard／open_map_layer。若使用者明確要看地圖／圖層／在地圖上找站點，才可 navigate practical_transportation_newtpe + metrotaipei + mode=mapview，並 open_map_layer youbike_availability；文字回覆仍勿導向「圖資」或 map-layers-taipei／map-layers-metrotaipei。
 【自行車道／路網】為車道／路線主題，非 YouBike 站位；用 resolve_navigation_target 找 component_index，勿與 youbike_availability 混淆。
