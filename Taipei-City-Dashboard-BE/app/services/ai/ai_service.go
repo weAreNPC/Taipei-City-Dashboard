@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/tmc/langchaingo/llms"
@@ -55,6 +56,7 @@ func newSession(req AIChatRequest, options ...llms.CallOption) *aiSession {
 		req:             req,
 		options:         options,
 		currentMessages: make([]llms.MessageContent, 0),
+		lastToolResults: make(map[string]string),
 		startTime:       time.Now(),
 	}
 	for _, opt := range options {
@@ -73,6 +75,7 @@ type aiSession struct {
 	totalOutput     int
 	toolUsed        bool
 	executedTools   []string
+	lastToolResults map[string]string
 	lastResp        *llms.ContentResponse
 	lastErr         error
 	startTime       time.Time
@@ -97,6 +100,12 @@ func (s *aiSession) run(ctx context.Context) (*models.AIChatLog, error) {
 		logs.FInfo("Loop %d: Processing %d tool calls", i, len(toolCalls))
 		if err := s.executeTools(ctx, toolCalls); err != nil {
 			break
+		}
+	}
+	if s.lastErr == nil {
+		toolCalls := s.extractToolCalls()
+		if len(toolCalls) > 0 {
+			s.forceFinalJSONResponse(ctx)
 		}
 	}
 	return s.finalize()
@@ -157,11 +166,19 @@ func (s *aiSession) executeTools(ctx context.Context, toolCalls []llms.ToolCall)
 
 	for _, tc := range toolCalls {
 		s.executedTools = append(s.executedTools, tc.FunctionCall.Name)
-		result, err := tools.Execute(ctx, tc.FunctionCall.Name, tc.FunctionCall.Arguments)
-		if err != nil {
-			result = fmt.Sprintf("Error: %v. Please verify arguments.", err)
-			logs.FError("Tool Error: %v", err)
+		result := ""
+		if !tools.Exists(tc.FunctionCall.Name) {
+			result = fmt.Sprintf("Error: tool %s is not a backend tool. Do not call it as a tool. If it is an UI action (navigate_dashboard, open_component_info, switch_city, open_map_layer), place it in final JSON field ui_actions instead.", tc.FunctionCall.Name)
+			logs.FError("Tool Error: tool %s not found", tc.FunctionCall.Name)
+		} else {
+			var err error
+			result, err = tools.Execute(ctx, tc.FunctionCall.Name, tc.FunctionCall.Arguments)
+			if err != nil {
+				result = fmt.Sprintf("Error: %v. Please verify arguments.", err)
+				logs.FError("Tool Error: %v", err)
+			}
 		}
+		s.lastToolResults[tc.FunctionCall.Name] = result
 
 		s.currentMessages = append(s.currentMessages, llms.MessageContent{
 			Role: llms.ChatMessageTypeTool,
@@ -171,6 +188,26 @@ func (s *aiSession) executeTools(ctx context.Context, toolCalls []llms.ToolCall)
 		})
 	}
 	return nil
+}
+
+func (s *aiSession) forceFinalJSONResponse(ctx context.Context) {
+	s.currentMessages = append(s.currentMessages, llms.MessageContent{
+		Role: llms.ChatMessageTypeSystem,
+		Parts: []llms.ContentPart{
+			llms.TextContent{Text: "Stop calling tools. Now produce final answer only. Return strict JSON with keys reply and ui_actions. ui_actions can only include: navigate_dashboard, open_component_info, switch_city, open_map_layer."},
+		},
+	})
+	resp, err := twccModel.GenerateContent(
+		ctx,
+		s.currentMessages,
+		append(s.options, llms.WithTools([]llms.Tool{}), llms.WithToolChoice("none"))...,
+	)
+	if err != nil {
+		logs.FError("Force final response failed: %v", err)
+		return
+	}
+	s.lastResp = resp
+	s.updateTokens()
 }
 
 func (s *aiSession) injectInstructions() {
@@ -220,6 +257,10 @@ func (s *aiSession) finalize() (*models.AIChatLog, error) {
 
 	if s.lastResp != nil && len(s.lastResp.Choices) > 0 {
 		log.Answer = s.lastResp.Choices[0].Content
+		if strings.TrimSpace(log.Answer) == "" {
+			log.Answer = s.buildFallbackJSONAnswer()
+		}
+		log.Answer = normalizeAIAnswer(log.Answer)
 		log.InputTokens, log.OutputTokens = s.totalInput, s.totalOutput
 		log.TotalTokens = s.totalInput + s.totalOutput
 		if s.toolUsed {
@@ -234,6 +275,46 @@ func (s *aiSession) finalize() (*models.AIChatLog, error) {
 		logs.FError("DB Log Error: %v", err)
 	}
 	return log, nil
+}
+
+func (s *aiSession) buildFallbackJSONAnswer() string {
+	if raw, ok := s.lastToolResults["get_component_facts"]; ok && raw != "" && !strings.HasPrefix(raw, "Error:") {
+		var facts struct {
+			Component struct {
+				Index     string `json:"index"`
+				Name      string `json:"name"`
+				ShortDesc string `json:"short_desc"`
+				City      string `json:"city"`
+			} `json:"component"`
+		}
+		if err := json.Unmarshal([]byte(raw), &facts); err == nil && facts.Component.Index != "" {
+			reply := fmt.Sprintf("%s（%s）重點：%s", facts.Component.Name, facts.Component.City, facts.Component.ShortDesc)
+			payload := map[string]interface{}{
+				"reply": reply,
+				"ui_actions": []map[string]interface{}{
+					{
+						"type": "open_component_info",
+						"params": map[string]interface{}{
+							"component_index": facts.Component.Index,
+							"city":            facts.Component.City,
+						},
+					},
+				},
+			}
+			if b, err := json.Marshal(payload); err == nil {
+				return string(b)
+			}
+		}
+	}
+
+	fallback := map[string]interface{}{
+		"reply":      "目前已接收到你的問題，但 AI 回覆內容為空。請再試一次，或直接指定組件 index（例如 youbike_availability）。",
+		"ui_actions": []interface{}{},
+	}
+	if b, err := json.Marshal(fallback); err == nil {
+		return string(b)
+	}
+	return `{"reply":"AI 回覆暫時異常，請稍後再試。","ui_actions":[]}`
 }
 
 func toolsToParts(calls []llms.ToolCall) []llms.ContentPart {
@@ -268,3 +349,34 @@ func parseUsageInt(val interface{}) int {
 	default: return 0
 	}
 }
+
+type normalizedAIResponse struct {
+	Reply     string                   `json:"reply"`
+	UIActions []map[string]interface{} `json:"ui_actions"`
+}
+
+func normalizeAIAnswer(rawAnswer string) string {
+	trimmed := strings.TrimSpace(rawAnswer)
+	trimmed = strings.TrimPrefix(trimmed, "```json")
+	trimmed = strings.TrimPrefix(trimmed, "```JSON")
+	trimmed = strings.TrimSuffix(trimmed, "```")
+	trimmed = strings.TrimSpace(trimmed)
+	if trimmed == "" {
+		return rawAnswer
+	}
+
+	var payload normalizedAIResponse
+	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return rawAnswer
+	}
+	if payload.UIActions == nil {
+		payload.UIActions = []map[string]interface{}{}
+	}
+
+	normalized, err := json.Marshal(payload)
+	if err != nil {
+		return rawAnswer
+	}
+	return string(normalized)
+}
+
