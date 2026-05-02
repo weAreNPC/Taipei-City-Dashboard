@@ -18,6 +18,7 @@ import DashboardComponent from "../dashboardComponent/DashboardComponent.vue";
 import { useContentStore } from "../store/contentStore";
 import { useDialogStore } from "../store/dialogStore";
 import { useMapStore } from "../store/mapStore";
+import { useChatStore } from "../store/chatStore";
 import MapContainer from "../components/map/MapContainer.vue";
 import MoreInfo from "../components/dialogs/MoreInfo.vue";
 import ReportIssue from "../components/dialogs/ReportIssue.vue";
@@ -25,6 +26,7 @@ import ReportIssue from "../components/dialogs/ReportIssue.vue";
 const contentStore = useContentStore();
 const dialogStore = useDialogStore();
 const mapStore = useMapStore();
+const chatStore = useChatStore();
 const route = useRoute();
 
 const toggleOn = ref({
@@ -46,6 +48,49 @@ const parseMapLayers = computed(() => {
 	return { hasMap: hasMap, noMap: noMap };
 });
 
+function isMapConfigVisible(mapConfig = []) {
+	if (!Array.isArray(mapConfig) || mapConfig.length === 0) return false;
+	return mapConfig.some((layer) =>
+		mapStore.currentVisibleLayers.includes(
+			`${layer.index}-${layer.type}-${layer.city}`,
+		),
+	);
+}
+
+function syncToggleStateFromVisibleLayers() {
+	const hasMap = parseMapLayers.value.hasMap || [];
+	const noMap = parseMapLayers.value.noMap || [];
+	const dashboardComponents = contentStore.currentDashboard.components || [];
+	const basicLayers = contentStore.mapLayers || [];
+
+	toggleOn.value = {
+		hasMap: hasMap.map((item) => isMapConfigVisible(item.map_config)),
+		noMap: new Array(noMap.length).fill(false),
+		mapLayer: dashboardComponents.map((item) =>
+			isMapConfigVisible(item.map_config),
+		),
+		basicLayer: basicLayers.map((item) =>
+			isMapConfigVisible(item.map_config),
+		),
+	};
+}
+
+function forceOpenComponentToggle(componentIndex) {
+	if (!componentIndex) return;
+	const normalizedIndex = String(componentIndex).toLowerCase().trim();
+
+	(parseMapLayers.value.hasMap || []).forEach((item, idx) => {
+		if (String(item?.index || "").toLowerCase().trim() === normalizedIndex) {
+			toggleOn.value.hasMap[idx] = true;
+		}
+	});
+	(contentStore.currentDashboard.components || []).forEach((item, idx) => {
+		if (String(item?.index || "").toLowerCase().trim() === normalizedIndex) {
+			toggleOn.value.mapLayer[idx] = true;
+		}
+	});
+}
+
 watch(
 	() => route.query.index,
 	(newIndex, oldIndex) => {
@@ -64,7 +109,44 @@ watch(
 					false,
 				),
 			};
+			syncToggleStateFromVisibleLayers();
 		}
+	},
+);
+
+watch(
+	() => mapStore.currentVisibleLayers.slice(),
+	() => {
+		syncToggleStateFromVisibleLayers();
+	},
+	{ immediate: true },
+);
+
+watch(
+	() => mapStore.currentLayers.slice(),
+	() => {
+		syncToggleStateFromVisibleLayers();
+	},
+	{ immediate: true },
+);
+
+watch(
+	() => [
+		parseMapLayers.value.hasMap?.length || 0,
+		parseMapLayers.value.noMap?.length || 0,
+		contentStore.currentDashboard.components?.length || 0,
+		contentStore.mapLayers?.length || 0,
+	],
+	() => {
+		syncToggleStateFromVisibleLayers();
+	},
+	{ immediate: true },
+);
+
+watch(
+	() => chatStore.lastMapLayerAction?.timestamp,
+	() => {
+		forceOpenComponentToggle(chatStore.lastMapLayerAction?.componentIndex);
 	},
 );
 
