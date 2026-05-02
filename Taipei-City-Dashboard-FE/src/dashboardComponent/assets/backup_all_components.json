@@ -5464,6 +5464,53 @@
 				"林育緹",
 				"tuic"
 			]
+		},
+		"165": {
+			"id": 165,
+			"index": "taipei_green_shop",
+			"map_config": [
+				{
+					"index": "taipei_green_shop",
+					"source": "geojson",
+					"type": "circle",
+					"title": "台北市綠色商店",
+					"size": null,
+					"icon": null,
+					"paint": {
+						"circle-color": "#4caf50",
+						"circle-radius": 5,
+						"circle-opacity": 0.85,
+						"circle-stroke-color": "#ffffff",
+						"circle-stroke-width": 1
+					},
+					"property": [
+						{ "key": "名稱", "name": "商店名稱" },
+						{ "key": "類型", "name": "類型" },
+						{ "key": "地址", "name": "地址" },
+						{ "key": "電話", "name": "電話" },
+						{ "key": "商店編號", "name": "商店編號" }
+					]
+				}
+			],
+			"chart_config": {
+				"types": ["MapLegend"],
+				"color": ["#4caf50"]
+			},
+			"chart_data": [
+				{ "type": "circle", "name": "綠色商店", "value": 906 }
+			],
+			"name": "台北市綠色商店",
+			"source": "環保局",
+			"time_from": "static",
+			"time_to": null,
+			"update_freq": null,
+			"update_freq_unit": null,
+			"short_desc": "顯示台北市環保局認證之綠色商店點位分布。",
+			"long_desc": "顯示台北市政府環保局認證之綠色商店點位，包含連鎖型與個別型商家，共 906 處。綠色商店為通過環保標章認證、積極推動環保理念的商業場所。",
+			"use_case": "可查詢台北市各行政區的綠色商店分布，提供市民選購友善環境商品的參考資訊，並可結合其他環保指標進行分析。",
+			"tags": [],
+			"links": null,
+			"contributors": []
 		}
 	}
 }
