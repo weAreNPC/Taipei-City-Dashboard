@@ -30,18 +30,9 @@ const parseSeries = computed(() => {
 	);
 });
 
-const totalMax = computed(() => {
-	if (props.series[0].name.slice(-2) === props.series[1].name.slice(-2)) {
-		let max = Math.max(
-			...props.series[0].data.map((d) => d.y),
-			...props.series[1].data.map((d) => d.y)
-		);
-
-		// add 10% then round up to the nearest 100
-		return Math.ceil((max * 1.1) / 100) * 100;
-	}
-	return null;
-});
+function legendMarkerRadius() {
+	return (props.series || []).map((_, index) => (index === 0 ? 0 : 20));
+}
 
 const chartOptions = ref({
 	chart: {
@@ -62,7 +53,7 @@ const chartOptions = ref({
 	legend: {
 		show: true,
 		markers: {
-			radius: [0, 20],
+			radius: legendMarkerRadius(),
 		},
 	},
 	markers: {
@@ -131,49 +122,20 @@ const chartOptions = ref({
 		},
 		type: "datetime",
 	},
-	yaxis: [
-		{
-			min: 0,
-			max: function (max) {
-				if (totalMax.value) {
-					return totalMax.value;
-				}
-				return max;
-			},
-			labels: {
-				formatter: function (val) {
-					return val.toFixed(0);
-				},
-			},
-			title: {
-				text: props.series[0].name,
-				style: {
-					color: "var(--color-complement-text)",
-				},
+	yaxis: {
+		min: 0,
+		labels: {
+			formatter: function (val) {
+				return val.toFixed(0);
 			},
 		},
-		{
-			min: 0,
-			max: function (max) {
-				if (totalMax.value) {
-					return totalMax.value;
-				}
-				return max;
-			},
-			labels: {
-				formatter: function (val) {
-					return val.toFixed(0);
-				},
-			},
-			opposite: true,
-			title: {
-				text: props.series?.[1]?.name ?? "",
-				style: {
-					color: "var(--color-complement-text)",
-				},
+		title: {
+			text: props.series[0]?.name ?? "",
+			style: {
+				color: "var(--color-complement-text)",
 			},
 		},
-	],
+	},
 });
 
 function parseTime(time) {
@@ -200,6 +162,13 @@ watch(
 			});
 			chartOptions.value = {
 				...chartOptions.value,
+				legend: {
+					...chartOptions.value.legend,
+					markers: {
+						...chartOptions.value.legend.markers,
+						radius: legendMarkerRadius(),
+					},
+				},
 				xaxis: {
 					...chartOptions.value.xaxis,
 					type: "category",
@@ -209,6 +178,13 @@ watch(
 		} else {
 			chartOptions.value = {
 				...chartOptions.value,
+				legend: {
+					...chartOptions.value.legend,
+					markers: {
+						...chartOptions.value.legend.markers,
+						radius: legendMarkerRadius(),
+					},
+				},
 				xaxis: {
 					...chartOptions.value.xaxis,
 					type: "datetime",
