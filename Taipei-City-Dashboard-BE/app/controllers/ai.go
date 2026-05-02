@@ -1,12 +1,15 @@
 package controllers
 
 import (
+	"TaipeiCityDashboardBE/app/models"
 	"TaipeiCityDashboardBE/app/services/ai"
 	"TaipeiCityDashboardBE/app/util"
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tmc/langchaingo/llms"
@@ -45,6 +48,34 @@ type AIChatInput struct {
 		} `json:"function" binding:"required"`
 	} `json:"tools,omitempty"`
 	ToolChoice interface{} `json:"tool_choice,omitempty"`
+	// UIContext 為前端介面快照（與 messages 分離）；模型透過工具 get_current_ui_context 取得，不應直接塞入 system 以節省 token。
+	UIContext json.RawMessage `json:"ui_context,omitempty"`
+}
+
+// GetComponentRoutingManifest GET /api/v1/ai/component-routing-manifest
+// 回傳目前使用者可見儀表板內所有組件之導覽連結與所屬儀表板（供 Agent 全站組件路由「全知」）。
+func GetComponentRoutingManifest(c *gin.Context) {
+	_, accountID, _, _, _ := util.GetUserInfoFromContext(c)
+	entries, err := models.GetComponentRoutingManifest(accountID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"status":  "error",
+			"message": err.Error(),
+		})
+		return
+	}
+	mapCatalog, mapCatTrunc := models.BuildAgentMapLayerCatalog(entries)
+	c.JSON(http.StatusOK, gin.H{
+		"status": "success",
+		"data": gin.H{
+			"generated_at": time.Now().UTC().Format(time.RFC3339),
+			"note":         "paths 為前端相對路徑（不含網站 origin）。links 以該組件×city 下 placements[0] 的儀表板為例；若同一組件出現在多個儀表板請看 placements。",
+			"components":   entries,
+			"mapview_layer_catalog":            mapCatalog,
+			"mapview_layer_catalog_truncated": mapCatTrunc,
+			"mapview_layer_catalog_note":      "每筆：在 /mapview?index=dashboard_index&city=mapview_city 時，openable_layers 為該板可開之地圖組件；open_map_layer 請帶 component_index 與 component_city。由 manifest 動態產生，與使用者可見側欄一致。",
+		},
+	})
 }
 
 // ChatWithTWCC is the controller for POST /api/v1/ai/chat/twai
@@ -68,11 +99,16 @@ func ChatWithTWCC(c *gin.Context) {
 
 	// 2. Prepare AI Request
 	_, accountID, _, _, _ := util.GetUserInfoFromContext(c)
+	uiPayload := ""
+	if len(input.UIContext) > 0 {
+		uiPayload = string(input.UIContext)
+	}
 	req := ai.AIChatRequest{
-		SessionID: sessionID,
-		UserID:    fmt.Sprintf("%d", accountID),
-		IPAddress: c.ClientIP(),
-		Messages:  input.ToServiceMessages(),
+		SessionID:        sessionID,
+		UserID:           fmt.Sprintf("%d", accountID),
+		IPAddress:        c.ClientIP(),
+		Messages:         input.ToServiceMessages(),
+		UIContextPayload: uiPayload,
 	}
 
 	// 3. Prepare Dynamic Options

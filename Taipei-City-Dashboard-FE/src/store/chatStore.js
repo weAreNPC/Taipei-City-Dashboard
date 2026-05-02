@@ -10,6 +10,18 @@ const AGENT_TOOLS = [
 	{
 		type: "function",
 		function: {
+			name: "get_current_ui_context",
+			description:
+				"Returns the user's current frontend UI snapshot as JSON: route, current dashboard index/name/city/mode, components on screen, sidebar hints, mapview_layer_catalog, component_routing_digest, visible map layers, optional user_location. Call ONLY when the answer depends on where the user is now or what they see (e.g. 'this page', 'here', 'what layer is on', current map). Skip for generic facts that resolve_navigation_target or get_component_facts alone can answer.",
+			parameters: {
+				type: "object",
+				properties: {},
+			},
+		},
+	},
+	{
+		type: "function",
+		function: {
 			name: "get_component_facts",
 			description: "Get structured facts and chart preview of one component by id or index.",
 			parameters: {
@@ -27,7 +39,8 @@ const AGENT_TOOLS = [
 		type: "function",
 		function: {
 			name: "get_nearby_ubike_summary",
-			description: "Get nearby YouBike stations summary by latitude and longitude.",
+			description:
+				"Get nearby YouBike stations by latitude/longitude. When get_current_ui_context is used in the same turn, you MUST use map_context.user_location from that tool result for latitude/longitude (do not guess or use landmark defaults). Call get_current_ui_context first in a separate tool round if needed; do not invent coordinates.",
 			parameters: {
 				type: "object",
 				properties: {
@@ -53,6 +66,28 @@ const AGENT_TOOLS = [
 					max_components: { type: "integer", description: "Max components in summary, up to 10" },
 				},
 				required: ["dashboard_index"],
+			},
+		},
+	},
+	{
+		type: "function",
+		function: {
+			name: "resolve_navigation_target",
+			description:
+				"Look up component_index / dashboard_index from Chinese or English name fragments and optional city (taipei/metrotaipei). Same visibility as user sidebar. Use when unsure of exact index.",
+			parameters: {
+				type: "object",
+				properties: {
+					query: { type: "string", description: "Component or dashboard name / keyword" },
+					city: { type: "string", description: "taipei, metrotaipei, or empty" },
+					kind: {
+						type: "string",
+						description: "component | dashboard | all",
+						enum: ["component", "dashboard", "all"],
+					},
+					limit: { type: "integer", description: "Max matches per category, default 5" },
+				},
+				required: ["query"],
 			},
 		},
 	},
@@ -98,16 +133,298 @@ const COMPONENT_ALIAS_MAP = {
 	ubike: "youbike_availability",
 	youbike: "youbike_availability",
 };
+
+/** digest 尚未載入或缺少 youbike 列時之後備（與後端 ubikeFallback* 一致） */
+const UBIKE_MAP_LAYER_FALLBACK_ENTRY = {
+	preferred_dashboard_index: "practical_transportation_newtpe",
+	preferred_navigate_city: "metrotaipei",
+	city: "metrotaipei",
+	has_map_layer: true,
+	placement_dashboard_indexes: ["practical_transportation_newtpe"],
+};
+
+const navigateDashboardIndexRaw = (params) =>
+	params?.index || params?.dashboard_index || params?.dashboard || "";
+
+const isMapLayersDashboardIndex = (idx) => normalizeText(idx).includes("map-layers");
+
+const firstNonEmptyParam = (...vals) => {
+	for (const v of vals) {
+		const s = String(v ?? "").trim();
+		if (s) return s;
+	}
+	return "";
+};
+
+/** 與後端 GetComponentRoutingManifest 對齊之精簡表，供 prompt 與執行 ui_actions 前修正導航。 */
+const MAX_ROUTING_DIGEST = 500;
+
+const buildRoutingDigestFromAPIComponents = (components) => {
+	if (!Array.isArray(components)) return [];
+	const out = [];
+	for (const e of components) {
+		const pl = e.placements || [];
+		if (!pl.length) continue;
+		const preferred =
+			pl.find(
+				(p) =>
+					p?.dashboard_index &&
+					!normalizeText(p.dashboard_index).includes("map-layers"),
+			) || pl[0];
+		if (!preferred?.dashboard_index) continue;
+		out.push({
+			component_index: e.component_index,
+			name: e.name,
+			city: e.city,
+			has_map_layer: !!e.has_map_layer,
+			preferred_dashboard_index: preferred.dashboard_index,
+			preferred_navigate_city: e.city,
+			placement_dashboard_indexes: pl.map((p) => p.dashboard_index).filter(Boolean),
+		});
+		if (out.length >= MAX_ROUTING_DIGEST) break;
+	}
+	return out;
+};
+
+const collectOpenMapLayerTargetsFromActions = (actions) => {
+	if (!Array.isArray(actions)) return [];
+	const out = [];
+	for (const a of actions) {
+		if (a?.type !== "open_map_layer") continue;
+		const p = a.params || {};
+		const raw = firstNonEmptyParam(
+			p.component_index,
+			p.index,
+			p.component,
+			p.layer,
+		);
+		const ci = COMPONENT_ALIAS_MAP[normalizeText(raw)] || raw;
+		if (ci) {
+			out.push({ component_index: ci, city: String(p.city || "").trim() });
+		}
+	}
+	return out;
+};
+
+const findRoutingDigestEntry = (digest, componentIndex, city) => {
+	if (!Array.isArray(digest) || !componentIndex) return null;
+	const cx = normalizeText(componentIndex);
+	const cty = normalizeText(city);
+	let fallback = null;
+	for (const e of digest) {
+		if (normalizeText(e.component_index) !== cx) continue;
+		if (!cty) return e;
+		if (normalizeText(e.city) === cty) return e;
+		if (!fallback) fallback = e;
+	}
+	return fallback;
+};
+
+const isOnPreferredMapviewDashboard = (contentStore, entry) => {
+	const mode = contentStore.currentDashboard?.mode || "";
+	if (!mode.includes("mapview")) return false;
+	const wantCity = entry.preferred_navigate_city || entry.city || "";
+	return (
+		normalizeText(contentStore.currentDashboard?.index) ===
+			normalizeText(entry.preferred_dashboard_index) &&
+		(!wantCity ||
+			normalizeText(contentStore.currentDashboard?.city) === normalizeText(wantCity))
+	);
+};
+
+const needsPreferredMapviewFirst = (contentStore, entry) => {
+	if (!entry?.preferred_dashboard_index || !entry?.has_map_layer) return false;
+	if (isOnPreferredMapviewDashboard(contentStore, entry)) return false;
+	return true;
+};
+
+/** 先切到 manifest 建議的 mapview 儀表板；已在該頁則略過。 */
+const ensurePreferredMapviewDashboard = async (contentStore, entry) => {
+	if (!entry?.preferred_dashboard_index) return "";
+	if (isOnPreferredMapviewDashboard(contentStore, entry)) {
+		return "";
+	}
+	const resolved = resolveDashboardTarget(
+		contentStore.dashboards,
+		entry.preferred_dashboard_index,
+		entry.preferred_navigate_city || entry.city,
+	);
+	const index = resolved?.index || entry.preferred_dashboard_index;
+	const navCity = resolved?.city || entry.preferred_navigate_city || entry.city;
+	await router.push({ path: "/mapview", query: { index, city: navCity } });
+	const deadline = Date.now() + 20000;
+	while (Date.now() < deadline) {
+		if (isOnPreferredMapviewDashboard(contentStore, entry) && !contentStore.loading) {
+			break;
+		}
+		await sleep(150);
+	}
+	return `已切換至地圖儀表板（${index}，${navCity}）`;
+};
+
+const rewriteNavigateForMapLayerBatch = (actions, digest) => {
+	if (!Array.isArray(actions)) return actions;
+	const layerTargets = collectOpenMapLayerTargetsFromActions(actions);
+	const digestList = Array.isArray(digest) ? digest : [];
+	return actions.map((a) => {
+		if (a?.type !== "navigate_dashboard") return a;
+		let comp = firstNonEmptyParam(
+			a.params?.component_index,
+			a.params?.map_layer_component_index,
+		);
+		let cty = String(a.params?.city || "").trim();
+		if (!comp && layerTargets.length === 1) {
+			comp = layerTargets[0].component_index;
+			cty = layerTargets[0].city || cty;
+		}
+		if (!comp) return a;
+		comp = COMPONENT_ALIAS_MAP[normalizeText(comp)] || comp;
+		let entry =
+			digestList.length > 0 ? findRoutingDigestEntry(digestList, comp, cty) : null;
+		if (
+			!entry?.preferred_dashboard_index &&
+			normalizeText(comp) === "youbike_availability"
+		) {
+			entry = UBIKE_MAP_LAYER_FALLBACK_ENTRY;
+		}
+		if (!entry?.preferred_dashboard_index) return a;
+		const cur = navigateDashboardIndexRaw(a.params);
+		const wrongBoard =
+			isMapLayersDashboardIndex(cur) ||
+			(entry.placement_dashboard_indexes?.length > 0 &&
+				!entry.placement_dashboard_indexes.some(
+					(x) => normalizeText(x) === normalizeText(cur),
+				));
+		if (!wrongBoard) return a;
+		return {
+			...a,
+			params: {
+				...a.params,
+				index: entry.preferred_dashboard_index,
+				city: entry.preferred_navigate_city || entry.city,
+				mode: "mapview",
+			},
+		};
+	});
+};
+
+/** 自行車「道／路網」設施圖，勿與 YouBike 站點圖層混淆 */
+const isBikeLaneInfrastructureIntent = (value) => {
+	const raw = String(value || "");
+	const n = normalizeText(raw);
+	return (
+		n.includes("自行車道") ||
+		n.includes("自行車道路") ||
+		n.includes("單車道") ||
+		n.includes("自行車路網") ||
+		n.includes("自行車路線") ||
+		n.includes("單車路網") ||
+		n.includes("車道圖") ||
+		n.includes("自行車專用道") ||
+		/(自行車|單車).{0,8}(道|路網|路線)/.test(raw) ||
+		/(道|路網).{0,8}(自行車|單車)/.test(raw)
+	);
+};
+
 const isUbikeKeyword = (value) => {
 	const text = normalizeText(value);
 	if (!text) return false;
+	if (isBikeLaneInfrastructureIntent(value)) return false;
 	return (
 		text.includes("ubike") ||
 		text.includes("youbike") ||
+		text.includes("微笑單車") ||
 		text.includes("自行車") ||
-		text.includes("單車") ||
-		text.includes("bike")
+		text.includes("單車")
 	);
+};
+
+/** 使用者明確要看地圖／圖層時（與「只要數字／文字資訊」區隔） */
+const MAP_VISUALIZATION_HINT =
+	/地圖|圖層|mapview|開.*圖層|顯示.*圖層|切到.*地圖|地圖介面|地圖模式|在地圖|看.*分布/i;
+
+const userWantsMapVisualization = (q) => {
+	const s = String(q || "").trim();
+	if (MAP_VISUALIZATION_HINT.test(s)) return true;
+	if (isUbikeKeyword(s) && /\bmap\b|地圖|圖層|layer/i.test(s)) return true;
+	return false;
+};
+
+const cloneUiActionsForMutation = (actions) =>
+	Array.isArray(actions)
+		? actions.map((a) => ({
+				...a,
+				params: { ...(a.params || {}) },
+			}))
+		: [];
+
+const inferCityFromNavigateActions = (actions) => {
+	for (let i = actions.length - 1; i >= 0; i--) {
+		const a = actions[i];
+		if (a?.type === "navigate_dashboard" && a.params?.city) {
+			return String(a.params.city).trim();
+		}
+	}
+	return "";
+};
+
+const batchReferencesUbikeLayer = (actions) =>
+	actions.some((a) => {
+		if (a.type === "open_map_layer") {
+			const raw = firstNonEmptyParam(
+				a.params?.component_index,
+				a.params?.index,
+				a.params?.layer,
+			);
+			const n = COMPONENT_ALIAS_MAP[normalizeText(raw)] || raw;
+			return normalizeText(n) === "youbike_availability";
+		}
+		if (a.type === "navigate_dashboard") {
+			const raw = firstNonEmptyParam(
+				a.params?.component_index,
+				a.params?.map_layer_component_index,
+				a.params?.layer,
+			);
+			const n = COMPONENT_ALIAS_MAP[normalizeText(raw)] || raw;
+			return normalizeText(n) === "youbike_availability";
+		}
+		return false;
+	});
+
+/**
+ * 模型常省略 mode=mapview 或未附 open_map_layer。當使用者話術明确要求「地圖／圖層」時補齊。
+ */
+const ensureMapVisualizationUiActions = (actions, userQuestion, digest) => {
+	if (!userWantsMapVisualization(userQuestion)) return actions;
+	const list = cloneUiActionsForMutation(actions);
+	for (const a of list) {
+		if (a.type === "navigate_dashboard") {
+			a.params.mode = "mapview";
+		}
+	}
+	const wantsUbike =
+		isUbikeKeyword(userQuestion) || batchReferencesUbikeLayer(list);
+	const hasExplicitMapLayerStep =
+		list.some((a) => a.type === "open_map_layer") ||
+		list.some((a) => {
+			if (a.type !== "navigate_dashboard") return false;
+			return !!firstNonEmptyParam(
+				a.params?.component_index,
+				a.params?.map_layer_component_index,
+			);
+		});
+	if (wantsUbike && !hasExplicitMapLayerStep) {
+		const cy =
+			inferCityFromNavigateActions(list) ||
+			findRoutingDigestEntry(digest, "youbike_availability", "")?.preferred_navigate_city ||
+			findRoutingDigestEntry(digest, "youbike_availability", "")?.city ||
+			UBIKE_MAP_LAYER_FALLBACK_ENTRY.preferred_navigate_city;
+		list.push({
+			type: "open_map_layer",
+			params: { component_index: "youbike_availability", city: cy },
+		});
+	}
+	return list;
 };
 
 const collectDashboards = (dashboardsMap) => {
@@ -152,10 +469,166 @@ const resolveDashboardTarget = (dashboardsMap, rawIndex, cityHint = "") => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** 若有載入過 /component 全表，可把側欄的數字 id 對應成 component_index + city */
+const buildComponentIdLookupFromStore = (contentStore) => {
+	const list = contentStore.components;
+	if (!Array.isArray(list) || list.length === 0) return null;
+	const byId = {};
+	for (const c of list) {
+		if (c?.id == null) continue;
+		byId[String(c.id)] = {
+			component_index: c.index || "",
+			city: c.city || "",
+		};
+	}
+	return Object.keys(byId).length ? byId : null;
+};
+
+const enrichComponentIdsForAgent = (componentIds, lookup, maxItems = 80) => {
+	if (!lookup || !Array.isArray(componentIds)) return undefined;
+	const slice = componentIds.slice(0, maxItems);
+	return slice.map((id) => {
+		const hit = lookup[String(id)];
+		return hit?.component_index
+			? {
+					id,
+					component_index: hit.component_index,
+					city: hit.city || "",
+				}
+			: { id };
+	});
+};
+
+/** 側欄：各城市儀表板清單（component_ids 為後端整數；若有 components_with_index 則已對應 index／city） */
+const buildSidebarCatalogForAgent = (contentStore) => {
+	const cities =
+		contentStore.cityManager?.activeCities?.length > 0
+			? contentStore.cityManager.activeCities
+			: ["taipei", "metrotaipei"];
+	const lookup = buildComponentIdLookupFromStore(contentStore);
+	const sidebar_by_city = {};
+	for (const city of cities) {
+		const boards = contentStore.getDashboardsByCity(city) || [];
+		sidebar_by_city[city] = boards.map((d) => {
+			const component_ids = Array.isArray(d.components) ? d.components : [];
+			const row = {
+				index: d.index || "",
+				name: d.name || "",
+				component_ids,
+			};
+			const enriched = enrichComponentIdsForAgent(component_ids, lookup);
+			if (enriched) row.components_with_index = enriched;
+			return row;
+		});
+	}
+	return sidebar_by_city;
+};
+
+/** 目前儀表板 index 底下已載入的組件（跨 city 彙總於 cityDashboard） */
+const buildCurrentDashboardComponentsForAgent = (contentStore) => {
+	const raw = contentStore.cityDashboard?.components;
+	if (!Array.isArray(raw)) return [];
+	return raw.map((c) => ({
+		index: c.index || "",
+		name: c.name || "",
+		id: c.id,
+		city: c.city || "",
+		has_map_layer: !!(c.map_config && c.map_config.length),
+	}));
+};
+
+const mergeMapLayerCatalog = (contentStore) => {
+	const out = [];
+	const seen = new Set();
+	for (const list of [contentStore.allMapLayers, contentStore.mapLayers]) {
+		if (!Array.isArray(list)) continue;
+		for (const item of list) {
+			const key = `${item?.id ?? ""}:${item?.city ?? ""}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			out.push(item);
+		}
+	}
+	return out;
+};
+
+/** 圖資模式已載入的主題圖層 component index（供 Agent 對齊「地圖上有哪些」） */
+const buildThematicLayerIndexesHint = (contentStore) => {
+	const catalog = mergeMapLayerCatalog(contentStore);
+	if (!catalog.length) return [];
+	const uniq = [...new Set(catalog.map((c) => c.index).filter(Boolean))];
+	return uniq.slice(0, 100);
+};
+
+const pickComponentWithMapLayer = (candidates, normalizedComponent, requestedCity) => {
+	if (!Array.isArray(candidates)) return null;
+	return (
+		candidates.find(
+			(item) =>
+				normalizeText(item?.index) === normalizeText(normalizedComponent) &&
+				(!requestedCity ||
+					normalizeText(item?.city) === normalizeText(requestedCity)) &&
+				Array.isArray(item?.map_config) &&
+				item.map_config.length > 0,
+		) || null
+	);
+};
+
+const fetchComponentWithMapLayerByIndex = async (normalizedComponent, requestedCity) => {
+	try {
+		const res = await http.get(`/component/`, {
+			params: {
+				filtermode: "eq",
+				filterby: "index",
+				filtervalue: normalizedComponent,
+				city: requestedCity,
+			},
+		});
+		const rows = res.data?.data || [];
+		let hit = pickComponentWithMapLayer(rows, normalizedComponent, requestedCity);
+		if (!hit) {
+			hit = rows.find(
+				(item) =>
+					normalizeText(item?.index) === normalizeText(normalizedComponent) &&
+					Array.isArray(item?.map_config) &&
+					item.map_config.length > 0,
+			);
+		}
+		return hit || null;
+	} catch {
+		return null;
+	}
+};
+
 export const useChatStore = defineStore('chat', () => {
 	const authStore = useAuthStore();
 	const contentStore = useContentStore();
 	const mapStore = useMapStore();
+
+	const routingManifestDigest = ref([]);
+	/** 與 manifest 一併下發：各 mapview 儀表板×city 下可 open_map_layer 的組件表 */
+	const agentMapviewLayerCatalog = ref([]);
+	const mapviewLayerCatalogTruncated = ref(false);
+	const routingManifestFetched = ref(false);
+
+	const ensureRoutingManifestDigest = async () => {
+		if (routingManifestFetched.value) return;
+		try {
+			const res = await http.get("/ai/component-routing-manifest");
+			const data = res.data?.data;
+			routingManifestDigest.value = buildRoutingDigestFromAPIComponents(
+				data?.components,
+			);
+			agentMapviewLayerCatalog.value = Array.isArray(data?.mapview_layer_catalog)
+				? data.mapview_layer_catalog
+				: [];
+			mapviewLayerCatalogTruncated.value = !!data?.mapview_layer_catalog_truncated;
+		} catch (e) {
+			console.warn("component-routing-manifest fetch failed", e);
+		} finally {
+			routingManifestFetched.value = true;
+		}
+	};
 
   	// 預設訊息
   	const defaultChatData = [
@@ -204,7 +677,10 @@ export const useChatStore = defineStore('chat', () => {
 		}
 		const aiResponse = await askAgent(newChatData.content);
 		if (aiResponse) {
-			const actionResults = await executeUIActions(aiResponse.ui_actions);
+			const actionResults = await executeUIActions(
+				aiResponse.ui_actions,
+				newChatData.content,
+			);
 			chatData.value.push({
 				id: chatData.value.length + 1,
 				role: 'bot',
@@ -243,11 +719,14 @@ export const useChatStore = defineStore('chat', () => {
 					};
 					resolve();
 				},
-				() => resolve(),
+				() => {
+					mapStore.userLocation = { latitude: null, longitude: null };
+					resolve();
+				},
 				{
 					enableHighAccuracy: true,
 					timeout: 10000,
-					maximumAge: 60000,
+					maximumAge: 0,
 				}
 			);
 		});
@@ -262,6 +741,27 @@ export const useChatStore = defineStore('chat', () => {
 			mode: contentStore.currentDashboard?.mode || "",
 			component_count: contentStore.currentDashboard?.components?.length || 0,
 		},
+		/** 使用者可見組件路由摘要（與 GET /ai/component-routing-manifest 一致；優先非 map-layers 儀表板） */
+		component_routing_digest: routingManifestDigest.value,
+		component_routing_digest_truncated:
+			routingManifestDigest.value.length >= MAX_ROUTING_DIGEST,
+		/**
+		 * 地圖可開圖層小目錄（後端由 manifest 動態產生）：每筆 { dashboard_index, mapview_city, openable_layers: [{ component_index, name, component_city }] }。
+		 * 意義：在 /mapview?index=dashboard_index&city=mapview_city 時，可對列管組件執行 open_map_layer（params 帶 component_index 與 city=component_city）。
+		 */
+		mapview_layer_catalog: agentMapviewLayerCatalog.value,
+		mapview_layer_catalog_truncated: mapviewLayerCatalogTruncated.value,
+		/** 左側欄位各城市儀表板；component_ids 為後端整數 id；若有逛過組件列表頁可能會多出 components_with_index */
+		sidebar_by_city: buildSidebarCatalogForAgent(contentStore),
+		/** 僅「目前這個儀表板」已載入的組件（index／name／id／city／has_map_layer）；換頁即變 */
+		current_dashboard_components: buildCurrentDashboardComponentsForAgent(contentStore),
+		/**
+		 * 圖資 map-layers-* 頁面上已載入的主題圖層 index；僅反映「圖資」情境。
+		 * 與 YouBike、務實交通等非圖資儀表板無對應關係，不可用它推斷 YouBike 該開在哪個儀表板。
+		 */
+		thematic_map_component_indexes_loaded: buildThematicLayerIndexesHint(
+			contentStore,
+		),
 		map_context: {
 			visible_layers: mapStore.currentVisibleLayers || [],
 			user_location: mapStore.userLocation || null,
@@ -270,22 +770,35 @@ export const useChatStore = defineStore('chat', () => {
 
 	const askAgent = async (question) => {
 		try {
+			await ensureRoutingManifestDigest();
 			const uiContext = buildUIContext();
 			const storedSession = sessionStorage.getItem("agentSessionId");
 			const response = await http.post("/ai/chat/twai", {
 				session: storedSession || "",
 				stream: false,
+				ui_context: uiContext,
 				messages: [
 					{
 						role: "system",
 						content: `你是臺北城市儀表板 agent。請優先使用工具回覆資料型問題，引用工具結果，不要臆測。
 你可建議 UI 操作，但只能使用以下 action type：navigate_dashboard、open_component_info、switch_city、open_map_layer。
-若使用者的意圖明確是「前往/切換/打開某個儀表板」，必須回傳 navigate_dashboard，不可省略 ui_actions。
+若使用者明確要「前往/切換/打開某個儀表板／地圖頁」，必須回傳對應 navigate_dashboard（或搭配 open_map_layer）；僅詢問統計或文字說明時不得為滿足此規則而強制導覽。
 請以 JSON 回覆，格式必須是：{"reply":"文字回覆","ui_actions":[{"type":"action_type","params":{...}}]}。
 若不需要操作，ui_actions 請回傳空陣列。
 工具參數 city 僅可使用小寫：taipei 或 metrotaipei。
-若使用者詢問 ubike/YouBike 使用情況且需要附近站點或可借數量，若 map_context.user_location 有座標，優先呼叫工具 get_nearby_ubike_summary，不要憑空估計數字；若缺少座標請明確請使用者提供定位授權。
-以下是目前前端介面狀態：${JSON.stringify(uiContext)}`,
+【介面快照】路由、目前儀表板、側欄、地圖可見層、定位、digest、catalog 等完整 JSON 須透過工具 get_current_ui_context（無參數）取得；與 GET /ai/component-routing-manifest 內 mapview_layer_catalog_note 之語意一致。僅在問題依賴「目前頁／畫面上有什麼／已開圖層／定位」時呼叫；純名稱／index 不確定時優先 resolve_navigation_target。工具若回 error（未附 ui_context）依錯誤提示處理。
+【get_current_ui_context 欄位速覽（mapview_layer_catalog_truncated 或 component_routing_digest_truncated 為 true 時，未列項目一律改 resolve_navigation_target）】
+• mapview_layer_catalog：每筆 dashboard_index + mapview_city = 一個 mapview URL 情境；openable_layers 為該板側欄可開之圖層（component_index、中文 name、open_map_layer 之 component_city）。開層前 navigate_dashboard 須對齊該組 index、city、mode=mapview。
+• component_routing_digest：側欄可見組件彙總（component_index、city、has_map_layer、preferred_dashboard_index 開圖層建議板且已避開 map-layers-*、placement_dashboard_indexes）。
+• current_dashboard_components：僅「目前畫面」儀表板已載入組件之 index／name／city／has_map_layer（換頁即變）。
+• sidebar_by_city：儀表板 index／name／component_ids；有 components_with_index 才有 component_index。
+• thematic_map_component_indexes_loaded：僅 map-layers-* 圖資頁主題層；不可替代 digest 決定一般組件應開在哪個板，勿僅因在此列表就 navigate 到 map-layers。
+• map_context.visible_layers／user_location：目前地圖已開層與定位（YouBike 附近站點見下）。
+【說明／資訊類問題】問「資訊／說明／有哪些／統計／分布」等除非確定無資料，須先工具查詢再在 reply 摘要重點；禁空話導覽。建議：resolve_navigation_target → get_component_facts 或 get_dashboard_component_summary；無結果時 reply 明說並建議換關鍵字。僅在使用者明確「帶我去／打開／切換」時才填 navigate_dashboard／open_map_layer。
+【只要資訊 vs 要開地圖】僅要數據／說明時 ui_actions 可 []。使用者要求看地圖／圖層／地圖模式時：navigate_dashboard.params.mode 必為字串 "mapview"（省略則成一般儀表板、非全幅地圖頁），並 open_map_layer（或 navigate 同帶 map_layer_component_index）；通常先對齊正確儀表板 mapview 再開層。
+【YouBike】附近站點／可借數：一律先 get_current_ui_context，再以回傳之 map_context.user_location 經緯度呼叫 get_nearby_ubike_summary（禁止並行、禁止臆測座標或套用景點預設點）；無定位則請使用者開定位，勿捏造距離。僅回答「資訊／附近／有多少」時 ui_actions 必為 []，不得 navigate_dashboard／open_map_layer。若使用者明確要看地圖／圖層／在地圖上找站點，才可 navigate practical_transportation_newtpe + metrotaipei + mode=mapview，並 open_map_layer youbike_availability；文字回覆仍勿導向「圖資」或 map-layers-taipei／map-layers-metrotaipei。
+【自行車道／路網】為車道／路線主題，非 YouBike 站位；用 resolve_navigation_target 找 component_index，勿與 youbike_availability 混淆。
+【導覽】不必背 index：(1) resolve_navigation_target；(2) 或 ui_actions params 給 component_name／name／dashboard_name + city，後端會比對側欄補齊 index／component_index。仍應盡量給正確 taipei／metrotaipei。資料細節用 get_component_facts、get_dashboard_component_summary；介面細節按需 get_current_ui_context。`,
 					},
 					{
 						role: "user",
@@ -329,20 +842,54 @@ export const useChatStore = defineStore('chat', () => {
 		}
 	};
 
-	const executeUIActions = async (actions) => {
+	const executeUIActions = async (actions, userQuestion = "") => {
 		if (!Array.isArray(actions) || actions.length === 0) return [];
+
+		let normalizedActions = ensureMapVisualizationUiActions(
+			actions,
+			userQuestion,
+			routingManifestDigest.value,
+		);
+		normalizedActions = rewriteNavigateForMapLayerBatch(
+			normalizedActions,
+			routingManifestDigest.value,
+		);
 
 		const openMapLayerFromParams = async (params = {}) => {
 			const requestedCity = params.city || contentStore.currentDashboard?.city || "taipei";
 			const requestedComponent =
-				params.component_index || params.index || params.component || "";
+				params.component_index ||
+				params.index ||
+				params.component ||
+				params.layer ||
+				"";
 			const normalizedComponent =
 				COMPONENT_ALIAS_MAP[normalizeText(requestedComponent)] || requestedComponent;
 			if (!normalizedComponent) {
 				return "open_map_layer 失敗：缺少 component_index";
 			}
 
-			const componentWaitDeadline = Date.now() + 10000;
+			let routingEntry = findRoutingDigestEntry(
+				routingManifestDigest.value,
+				normalizedComponent,
+				requestedCity,
+			);
+			if (
+				!routingEntry?.preferred_dashboard_index &&
+				normalizeText(normalizedComponent) === "youbike_availability"
+			) {
+				routingEntry = UBIKE_MAP_LAYER_FALLBACK_ENTRY;
+			}
+			let prefixMsg = "";
+			if (needsPreferredMapviewFirst(contentStore, routingEntry)) {
+				const navHint = await ensurePreferredMapviewDashboard(
+					contentStore,
+					routingEntry,
+				);
+				if (navHint) prefixMsg = `${navHint}。`;
+			}
+
+			const componentWaitDeadline = Date.now() + 16000;
 			let targetComponent = null;
 			while (Date.now() < componentWaitDeadline) {
 				const currentComponents = Array.isArray(contentStore.currentDashboard?.components)
@@ -354,11 +901,31 @@ export const useChatStore = defineStore('chat', () => {
 						(!requestedCity || normalizeText(item?.city) === normalizeText(requestedCity))
 				);
 				if (targetComponent?.map_config?.length) break;
+				targetComponent = pickComponentWithMapLayer(
+					mergeMapLayerCatalog(contentStore),
+					normalizedComponent,
+					requestedCity,
+				);
+				if (targetComponent?.map_config?.length) break;
 				await sleep(200);
 			}
 
 			if (!targetComponent?.map_config?.length) {
-				return `open_map_layer 失敗：找不到可開啟圖層的組件 (${normalizedComponent})`;
+				targetComponent = pickComponentWithMapLayer(
+					mergeMapLayerCatalog(contentStore),
+					normalizedComponent,
+					"",
+				);
+			}
+			if (!targetComponent?.map_config?.length) {
+				targetComponent = await fetchComponentWithMapLayerByIndex(
+					normalizedComponent,
+					requestedCity,
+				);
+			}
+
+			if (!targetComponent?.map_config?.length) {
+				return `${prefixMsg}open_map_layer 失敗：找不到可開啟圖層的組件 (${normalizedComponent})`;
 			}
 
 			const mapWaitDeadline = Date.now() + 10000;
@@ -376,11 +943,11 @@ export const useChatStore = defineStore('chat', () => {
 				city: targetComponent.city || requestedCity,
 				timestamp: Date.now(),
 			};
-			return `已開啟地圖圖層 ${normalizedComponent} (${targetComponent.city || requestedCity})`;
+			return `${prefixMsg}已開啟地圖圖層 ${normalizedComponent} (${targetComponent.city || requestedCity})`;
 		};
 
 		const results = [];
-		for (const action of actions) {
+		for (const action of normalizedActions) {
 			if (!action?.type || !ALLOWED_UI_ACTIONS[action.type]) {
 				results.push(`忽略未授權操作：${action?.type || "unknown"}`);
 				continue;

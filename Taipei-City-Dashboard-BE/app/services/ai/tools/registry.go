@@ -20,6 +20,8 @@ func init() {
 	Register("get_component_facts", GetComponentFacts)
 	Register("get_dashboard_component_summary", GetDashboardComponentSummary)
 	Register("get_nearby_ubike_summary", GetNearbyUbikeSummary)
+	Register("resolve_navigation_target", ResolveNavigationTarget)
+	Register("get_current_ui_context", GetCurrentUIContext)
 }
 
 // Register adds a tool to the registry
