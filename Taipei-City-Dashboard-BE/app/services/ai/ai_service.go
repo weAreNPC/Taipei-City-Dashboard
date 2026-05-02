@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,8 @@ type AIChatRequest struct {
 	IPAddress string                 `json:"ip_address"`
 	Messages  []llms.MessageContent  `json:"messages"`
 	Params    map[string]interface{} `json:"params"`
+	// UIContextPayload 為前端本次請求附帶的 JSON 字串（與 messages 分離），僅供工具 get_current_ui_context 回傳，避免塞入 system 訊息佔用 token。
+	UIContextPayload string `json:"-"`
 }
 
 // ChatWithTWCC handles the AI conversation logic including retries, tool calling loop, and logging.
@@ -108,7 +111,7 @@ func (s *aiSession) run(ctx context.Context) (*models.AIChatLog, error) {
 			s.forceFinalJSONResponse(ctx)
 		}
 	}
-	return s.finalize()
+	return s.finalize(ctx)
 }
 
 func (s *aiSession) sendHeartbeat(ctx context.Context) {
@@ -155,6 +158,14 @@ func (s *aiSession) updateTokens() {
 	}
 }
 
+func parseAIAccountID(userID string) int {
+	id, err := strconv.Atoi(strings.TrimSpace(userID))
+	if err != nil || id < 0 {
+		return 0
+	}
+	return id
+}
+
 func (s *aiSession) executeTools(ctx context.Context, toolCalls []llms.ToolCall) error {
 	choice := s.lastResp.Choices[0]
 	
@@ -164,15 +175,26 @@ func (s *aiSession) executeTools(ctx context.Context, toolCalls []llms.ToolCall)
 		Parts: append([]llms.ContentPart{llms.TextContent{Text: choice.Content}}, toolsToParts(toolCalls)...),
 	})
 
-	for _, tc := range toolCalls {
+	toolCtx := tools.WithAccountID(ctx, parseAIAccountID(s.req.UserID))
+	toolCtx = tools.WithUIContextPayload(toolCtx, s.req.UIContextPayload)
+	orderedCalls := prioritizeToolCallsForContextUbike(toolCalls)
+	for _, tc := range orderedCalls {
 		s.executedTools = append(s.executedTools, tc.FunctionCall.Name)
 		result := ""
+		args := tc.FunctionCall.Arguments
+		if tc.FunctionCall.Name == "get_nearby_ubike_summary" {
+			args = patchNearbyUbikeArgsFromUISnapshot(
+				s.lastToolResults["get_current_ui_context"],
+				s.req.UIContextPayload,
+				args,
+			)
+		}
 		if !tools.Exists(tc.FunctionCall.Name) {
 			result = fmt.Sprintf("Error: tool %s is not a backend tool. Do not call it as a tool. If it is an UI action (navigate_dashboard, open_component_info, switch_city, open_map_layer), place it in final JSON field ui_actions instead.", tc.FunctionCall.Name)
 			logs.FError("Tool Error: tool %s not found", tc.FunctionCall.Name)
 		} else {
 			var err error
-			result, err = tools.Execute(ctx, tc.FunctionCall.Name, tc.FunctionCall.Arguments)
+			result, err = tools.Execute(toolCtx, tc.FunctionCall.Name, args)
 			if err != nil {
 				result = fmt.Sprintf("Error: %v. Please verify arguments.", err)
 				logs.FError("Tool Error: %v", err)
@@ -238,7 +260,7 @@ func (s *aiSession) injectInstructions() {
 	}
 }
 
-func (s *aiSession) finalize() (*models.AIChatLog, error) {
+func (s *aiSession) finalize(ctx context.Context) (*models.AIChatLog, error) {
 	log := &models.AIChatLog{
 		SessionID: s.req.SessionID, UserID: s.req.UserID, IPAddress: s.req.IPAddress,
 		Provider: "twcc", Model: global.TWCC.Model, LatencyMS: int(time.Since(s.startTime).Milliseconds()),
@@ -260,7 +282,7 @@ func (s *aiSession) finalize() (*models.AIChatLog, error) {
 		if strings.TrimSpace(log.Answer) == "" {
 			log.Answer = s.buildFallbackJSONAnswer()
 		}
-		log.Answer = normalizeAIAnswer(log.Answer)
+		log.Answer = s.finalizeAnswerJSON(ctx, log.Answer)
 		log.InputTokens, log.OutputTokens = s.totalInput, s.totalOutput
 		log.TotalTokens = s.totalInput + s.totalOutput
 		if s.toolUsed {
@@ -354,29 +376,3 @@ type normalizedAIResponse struct {
 	Reply     string                   `json:"reply"`
 	UIActions []map[string]interface{} `json:"ui_actions"`
 }
-
-func normalizeAIAnswer(rawAnswer string) string {
-	trimmed := strings.TrimSpace(rawAnswer)
-	trimmed = strings.TrimPrefix(trimmed, "```json")
-	trimmed = strings.TrimPrefix(trimmed, "```JSON")
-	trimmed = strings.TrimSuffix(trimmed, "```")
-	trimmed = strings.TrimSpace(trimmed)
-	if trimmed == "" {
-		return rawAnswer
-	}
-
-	var payload normalizedAIResponse
-	if err := json.Unmarshal([]byte(trimmed), &payload); err != nil {
-		return rawAnswer
-	}
-	if payload.UIActions == nil {
-		payload.UIActions = []map[string]interface{}{}
-	}
-
-	normalized, err := json.Marshal(payload)
-	if err != nil {
-		return rawAnswer
-	}
-	return string(normalized)
-}
-

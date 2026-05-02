@@ -203,6 +203,7 @@ func configureAIRoutes() {
 	aiRoutes.Use(middleware.LimitTotalRequests(global.ComponentLimitTotalRequestsTimes, global.LimitRequestsDuration))
 	{
 		aiRoutes.POST("/chat/twai", controllers.ChatWithTWCC)
+		aiRoutes.GET("/component-routing-manifest", controllers.GetComponentRoutingManifest)
 	}
 }
 
