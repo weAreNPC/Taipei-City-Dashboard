@@ -1,4 +1,4 @@
-year,city,incineration_tons,sanitary_tons,daily_municipal_waste_kgs,daily_food_waste_kgs,municipal_waste_disposal_rate,municipal_waste_recycling_rate
+year,district,incineration_tons,sanitary_tons,daily_municipal_waste_kgs,daily_food_waste_kgs,municipal_waste_disposal_rate,municipal_waste_recycling_rate
 114,taipei,309675,0,1.158,0.049,100,70.80
 114,new_taipei,656084,5923,1.328,0.070,100.00,66.32
 113,taipei,294274,0,1.086,0.052,100.00,70.27
