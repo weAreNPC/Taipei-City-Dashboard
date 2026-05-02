@@ -85,7 +85,7 @@ type aiSession struct {
 }
 
 func (s *aiSession) run(ctx context.Context) (*models.AIChatLog, error) {
-	maxLoops := 5
+	maxLoops := 8
 	s.executedTools = make([]string, 0)
 	for i := 0; i < maxLoops; i++ {
 		s.sendHeartbeat(ctx)

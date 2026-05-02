@@ -25,9 +25,10 @@ type componentFactsArgs struct {
 }
 
 type dashboardSummaryArgs struct {
-	DashboardIndex string `json:"dashboard_index"`
-	City           string `json:"city"`
-	MaxComponents  int    `json:"max_components"`
+	DashboardIndex   string   `json:"dashboard_index"`
+	City             string   `json:"city"`
+	MaxComponents    int      `json:"max_components"`
+	ComponentIndexes []string `json:"component_indexes"`
 }
 
 type nearbyComponentArgs struct {
@@ -166,6 +167,27 @@ func GetDashboardComponentSummary(ctx context.Context, args string) (string, err
 
 	if len(components) == 0 {
 		return "", fmt.Errorf("dashboard has no components")
+	}
+
+	if len(params.ComponentIndexes) > 0 {
+		want := make(map[string]struct{})
+		for _, idx := range params.ComponentIndexes {
+			s := strings.TrimSpace(idx)
+			if s != "" {
+				want[s] = struct{}{}
+			}
+		}
+		if len(want) > 0 {
+			filtered := make([]models.CityComponent, 0)
+			for _, c := range components {
+				if _, ok := want[c.Index]; ok {
+					filtered = append(filtered, c)
+				}
+			}
+			if len(filtered) > 0 {
+				components = filtered
+			}
+		}
 	}
 
 	if len(components) > maxComponents {
