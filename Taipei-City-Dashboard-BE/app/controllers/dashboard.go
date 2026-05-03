@@ -150,7 +150,7 @@ func CreatePublicDashboard(c *gin.Context) {
 
 	var query componentQuery
 	c.ShouldBindQuery(&query)
-	if !(query.City == "taipei" || query.City == "metrotaipei" || query.City == ""){
+	if !(query.City == "taipei" || query.City == "metrotaipei" || query.City == "newtaipei" || query.City == ""){
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Invalid City Name"})
 		return
 	}

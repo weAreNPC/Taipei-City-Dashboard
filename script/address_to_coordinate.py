@@ -3,8 +3,8 @@ import requests
 import pandas as pd
 
 # ── 設定檔案路徑 ──────────────────────────────────────────
-INPUT_PATH  = r"C:\Users\qweas\Desktop\git-repos\Taipei-City-Dashboard\Taipei_green_shop.ods"   # 貼上 ODS 檔案路徑，例如 r"C:\data\名單.ods"
-OUTPUT_PATH = r""   # 留空則自動產生（與輸入檔案同目錄，檔名加 _coordinates）
+INPUT_PATH  = "C:\\Users\\qweas\\Desktop\\git-repos\\Taipei-City-Dashboard\\taipei_green_shop.csv"   # 貼上 CSV 檔案路徑，例如 r"C:\\data\\名單.csv"
+OUTPUT_PATH = ""   # 留空則自動產生（與輸入檔案同目錄，檔名加 _coordinates）
 # ─────────────────────────────────────────────────────────
 
 BASE_URL = "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates"
@@ -30,9 +30,9 @@ def get_coordinates(address):
         response.raise_for_status()
 
 
-def process_ods(input_path, output_path):
+def process_csv(input_path, output_path):
     print(f"讀取檔案：{input_path}")
-    df = pd.read_excel(input_path, engine='odf')
+    df = pd.read_csv(input_path, encoding='utf-8-sig')
 
     if '聯絡地址' not in df.columns:
         raise ValueError("找不到「聯絡地址」欄位，請確認欄位名稱是否正確。")
@@ -67,7 +67,7 @@ def process_ods(input_path, output_path):
 
 if __name__ == "__main__":
     if not INPUT_PATH:
-        print("錯誤：請在腳本頂端的 INPUT_PATH 填入 ODS 檔案路徑。")
+        print("錯誤：請在腳本頂端的 INPUT_PATH 填入 CSV 檔案路徑。")
         exit(1)
 
     if not os.path.exists(INPUT_PATH):
@@ -76,4 +76,4 @@ if __name__ == "__main__":
 
     output_path = OUTPUT_PATH if OUTPUT_PATH else os.path.splitext(INPUT_PATH)[0] + '_coordinates.csv'
 
-    process_ods(INPUT_PATH, output_path)
+    process_csv(INPUT_PATH, output_path)

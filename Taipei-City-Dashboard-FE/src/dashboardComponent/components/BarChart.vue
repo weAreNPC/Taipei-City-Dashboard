@@ -101,6 +101,15 @@ const chartHeight = computed(() => {
 	return `${40 + props.series[0].data.length * 30}`;
 });
 
+const sum = computed(() => {
+	let total = 0;
+	if (!props.series?.[0]?.data) return 0;
+	props.series[0].data.forEach((item) => {
+		total += (typeof item === "object" ? item.y : item) || 0;
+	});
+	return Math.round(total * 100) / 100;
+});
+
 const selectedIndex = ref(null);
 
 function handleDataSelection(_e, _chartContext, config) {
@@ -142,6 +151,10 @@ function handleDataSelection(_e, _chartContext, config) {
 
 <template>
   <div v-if="activeChart === 'BarChart'">
+    <div class="barchart-title">
+      <h5>總計</h5>
+      <h6>{{ sum }} {{ chart_config.unit }}</h6>
+    </div>
     <VueApexCharts
       width="100%"
       :height="chartHeight"
@@ -152,3 +165,24 @@ function handleDataSelection(_e, _chartContext, config) {
     />
   </div>
 </template>
+
+<style scoped lang="scss">
+.barchart-title {
+	display: flex;
+	justify-content: center;
+	flex-direction: column;
+	margin: 0.5rem 0 -0.5rem;
+
+	h5 {
+		margin: 0;
+		color: var(--color-complement-text);
+	}
+
+	h6 {
+		margin: 0;
+		color: var(--color-complement-text);
+		font-size: var(--font-m);
+		font-weight: 400;
+	}
+}
+</style>
