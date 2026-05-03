@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -151,26 +152,98 @@ func repairLenientAgentJSONString(s string) string {
 	return string(b)
 }
 
-func parseNormalizedAIResponseFlexible(trimmed string) (normalizedAIResponse, error) {
-	var outer struct {
-		Reply json.RawMessage `json:"reply"`
-		UIRaw json.RawMessage `json:"ui_actions"`
+// sliceBalancedJSONObject 從 start（必須為「{」）以括號平衡取出一段 JSON 物件（字串內略過 { }）。
+func sliceBalancedJSONObject(text string, start int) string {
+	if start < 0 || start >= len(text) || text[start] != '{' {
+		return ""
 	}
-	payloadBytes := []byte(trimmed)
-	if err := json.Unmarshal(payloadBytes, &outer); err != nil {
-		relaxed := repairLenientAgentJSONString(trimmed)
-		if err2 := json.Unmarshal([]byte(relaxed), &outer); err2 != nil {
-			return normalizedAIResponse{}, err
+	depth := 0
+	inString := false
+	escape := false
+	for i := start; i < len(text); i++ {
+		c := text[i]
+		if inString {
+			if escape {
+				escape = false
+				continue
+			}
+			if c == '\\' {
+				escape = true
+				continue
+			}
+			if c == '"' {
+				inString = false
+				continue
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			continue
+		}
+		if c == '{' {
+			depth++
+		} else if c == '}' {
+			depth--
+			if depth == 0 {
+				return text[start : i+1]
+			}
 		}
 	}
-	var reply string
-	if len(outer.Reply) > 0 && string(outer.Reply) != "null" {
-		_ = json.Unmarshal(outer.Reply, &reply)
+	return ""
+}
+
+var embeddedAgentJSONStart = regexp.MustCompile(`\{\s*"reply"\s*:`)
+
+// extractEmbeddedAgentJSON 自「前文 + JSON」混合字串取出最後一段 {"reply":...} 物件（模型常先談話再附結構）。
+func extractEmbeddedAgentJSON(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
 	}
-	return normalizedAIResponse{
-		Reply:     reply,
-		UIActions: coerceUIActionsFromRaw(outer.UIRaw),
-	}, nil
+	idxs := embeddedAgentJSONStart.FindAllStringIndex(s, -1)
+	if len(idxs) == 0 {
+		return ""
+	}
+	start := idxs[len(idxs)-1][0]
+	return sliceBalancedJSONObject(s, start)
+}
+
+func parseNormalizedAIResponseFlexible(trimmed string) (normalizedAIResponse, error) {
+	trimmed = strings.TrimSpace(trimmed)
+	tryUnmarshal := func(raw string) (normalizedAIResponse, bool) {
+		var outer struct {
+			Reply json.RawMessage `json:"reply"`
+			UIRaw json.RawMessage `json:"ui_actions"`
+		}
+		if err := json.Unmarshal([]byte(raw), &outer); err != nil {
+			return normalizedAIResponse{}, false
+		}
+		var reply string
+		if len(outer.Reply) > 0 && string(outer.Reply) != "null" {
+			_ = json.Unmarshal(outer.Reply, &reply)
+		}
+		return normalizedAIResponse{
+			Reply:     reply,
+			UIActions: coerceUIActionsFromRaw(outer.UIRaw),
+		}, true
+	}
+
+	if r, ok := tryUnmarshal(trimmed); ok {
+		return r, nil
+	}
+	if r, ok := tryUnmarshal(repairLenientAgentJSONString(trimmed)); ok {
+		return r, nil
+	}
+	if emb := extractEmbeddedAgentJSON(trimmed); emb != "" {
+		if r, ok := tryUnmarshal(emb); ok {
+			return r, nil
+		}
+		if r, ok := tryUnmarshal(repairLenientAgentJSONString(emb)); ok {
+			return r, nil
+		}
+	}
+	return normalizedAIResponse{}, fmt.Errorf("cannot parse agent response JSON")
 }
 
 const uiActionsRepairSystemPrompt = `你是 JSON 修正器。使用者會提供一個物件，含 reply（字串）與 ui_actions（陣列）。
@@ -631,7 +704,7 @@ func ensureGenericOpenMapLayerFromUserQuestion(ctx context.Context, payload *nor
 	logs.FInfo("ui_actions: generic map intent — injected open_map_layer component=%s city=%s pick=%s (location_hint=%q)", ci, cy, pickMode, hint)
 }
 
-// userQuestionHintsGreenStoresMapLayer 綠色商家／綠商店 + 要看地圖或圖層。
+// userQuestionHintsGreenStoresMapLayer 綠色商家／綠商店 + 使用者明示要看地圖／圖層（切換畫面由前端依規則處理，後端不注入導覽）。
 func userQuestionHintsGreenStoresMapLayer(q string) bool {
 	q = strings.TrimSpace(q)
 	if q == "" {
@@ -666,25 +739,6 @@ func ensureBikeLaneOpenMapLayerFromUserQuestion(ctx context.Context, payload *no
 		},
 	})
 	logs.FInfo("ui_actions: bike lane map — injected open_map_layer %s city=%s", bikeLaneFallbackComponentIndex, cy)
-}
-
-// ensureGreenStoresOpenMapLayerFromUserQuestion：綠色商家地圖主題之後備（與 generic 分數門檻互補）。
-func ensureGreenStoresOpenMapLayerFromUserQuestion(ctx context.Context, payload *normalizedAIResponse, lastUserQuestion string, uiPayload string) {
-	if payload == nil || !userQuestionHintsGreenStoresMapLayer(lastUserQuestion) {
-		return
-	}
-	if uiActionsHasOpenMapLayer(payload) {
-		return
-	}
-	cy := inferOpenMapLayerCityTwinNorthAware(ctx, uiPayload, lastUserQuestion, ubikeFallbackDashboardCity)
-	payload.UIActions = append(payload.UIActions, map[string]interface{}{
-		"type": "open_map_layer",
-		"params": map[string]interface{}{
-			"component_index": greenStoresFallbackComponentIndex,
-			"city":            cy,
-		},
-	})
-	logs.FInfo("ui_actions: green stores map — injected open_map_layer %s city=%s", greenStoresFallbackComponentIndex, cy)
 }
 
 func openMapLayerTargetsIndex(payload *normalizedAIResponse) map[string]struct{} {
@@ -1121,7 +1175,6 @@ func (s *aiSession) finalizeAnswerJSON(ctx context.Context, rawAnswer string) st
 	ensureUbikeOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, s.req.UIContextPayload)
 	ensureGenericOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, accID, s.req.UIContextPayload)
 	ensureBikeLaneOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, s.req.UIContextPayload)
-	ensureGreenStoresOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, s.req.UIContextPayload)
 	rewriteNavigateDashboardsForMapLayerComponents(&payload, accID, s.lastToolResults, lastUser)
 	machineFixUIActions(&payload, s.lastToolResults)
 
@@ -1137,7 +1190,6 @@ func (s *aiSession) finalizeAnswerJSON(ctx context.Context, rawAnswer string) st
 		ensureUbikeOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, s.req.UIContextPayload)
 		ensureGenericOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, accID, s.req.UIContextPayload)
 		ensureBikeLaneOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, s.req.UIContextPayload)
-		ensureGreenStoresOpenMapLayerFromUserQuestion(ctx, &payload, lastUser, s.req.UIContextPayload)
 		rewriteNavigateDashboardsForMapLayerComponents(&payload, accID, s.lastToolResults, lastUser)
 		machineFixUIActions(&payload, s.lastToolResults)
 		if remain := uiActionsViolations(&payload); len(remain) > 0 {

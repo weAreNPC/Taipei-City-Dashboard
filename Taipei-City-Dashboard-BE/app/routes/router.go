@@ -204,6 +204,7 @@ func configureAIRoutes() {
 	{
 		aiRoutes.POST("/chat/twai", controllers.ChatWithTWCC)
 		aiRoutes.GET("/component-routing-manifest", controllers.GetComponentRoutingManifest)
+		aiRoutes.GET("/location-preview", controllers.GetAILocationPreview)
 	}
 }
 

@@ -80,13 +80,15 @@ func (s *aiSession) summarizeToolPayloadWithSideModel(ctx context.Context, toolN
 		},
 	}
 
+	// TWCC（及部分相容端點）拒絕 temperature=0（422: must be greater than 0）。
+	toolSummarizeTemp := 0.01
 	opts := []llms.CallOption{
 		llms.WithTools([]llms.Tool{}),
 		llms.WithMaxTokens(toolResultSummarizeMaxOutputTokens),
-		llms.WithTemperature(0),
+		llms.WithTemperature(toolSummarizeTemp),
 		llms.WithMetadata(map[string]interface{}{
 			"max_new_tokens": toolResultSummarizeMaxOutputTokens,
-			"temperature":    0.0,
+			"temperature":    toolSummarizeTemp,
 		}),
 	}
 

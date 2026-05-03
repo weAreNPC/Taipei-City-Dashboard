@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"html"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -75,6 +77,43 @@ func GetComponentRoutingManifest(c *gin.Context) {
 			"mapview_layer_catalog_truncated": mapCatTrunc,
 			"mapview_layer_catalog_note":      "每筆：在 /mapview?index=dashboard_index&city=mapview_city 時，openable_layers 為該板可開之地圖組件；open_map_layer 請帶 component_index 與 component_city。由 manifest 動態產生，與使用者可見側欄一致。",
 		},
+	})
+}
+
+// GetAILocationPreview GET /api/v1/ai/location-preview?latitude=&longitude=
+// 單次村里界查詢，回傳 reverse_geocode 與雙北偏好 city（taipei／metrotaipei），供前端關鍵字導覽推斷縣市。
+func GetAILocationPreview(c *gin.Context) {
+	latStr := strings.TrimSpace(c.Query("latitude"))
+	lngStr := strings.TrimSpace(c.Query("longitude"))
+	if latStr == "" || lngStr == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status":     "error",
+			"error_code": "INVALID_REQUEST",
+			"message":    "latitude and longitude are required",
+		})
+		return
+	}
+	lat, err1 := strconv.ParseFloat(latStr, 64)
+	lng, err2 := strconv.ParseFloat(lngStr, 64)
+	if err1 != nil || err2 != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"status":     "error",
+			"error_code": "INVALID_REQUEST",
+			"message":    "invalid latitude or longitude",
+		})
+		return
+	}
+	pref, rg, err := models.PreferredCityAndReverseGeocodeFromLatLng(c.Request.Context(), lat, lng)
+	out := gin.H{
+		"preferred_city":  pref,
+		"reverse_geocode": rg,
+	}
+	if err != nil {
+		out["lookup_error"] = err.Error()
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status": "success",
+		"data":   out,
 	})
 }
 

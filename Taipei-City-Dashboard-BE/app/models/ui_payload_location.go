@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // InferPreferredAgentCityFromUIPayload 由前端 body 之 ui_context JSON 推斷使用者偏好之資料縣市（taipei／metrotaipei）。
@@ -105,4 +106,47 @@ func jsonNumberToFloat64Location(v interface{}) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// PreferredCityAndReverseGeocodeFromLatLng 單次村里界查詢，供前端決定性導覽推斷縣市並填入 map_context.reverse_geocode。
+func PreferredCityAndReverseGeocodeFromLatLng(ctx context.Context, lat, lng float64) (preferredCity string, reverseGeocode map[string]interface{}, err error) {
+	if lat < -90 || lat > 90 || lng < -180 || lng > 180 {
+		return "", nil, fmt.Errorf("invalid coordinates")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 6*time.Second)
+		defer cancel()
+	}
+	place, err := GetLocationDataContext(ctx, lat, lng)
+	if err != nil {
+		return "", map[string]interface{}{
+			"source": "nlsc_town_village",
+			"error":  "lookup_failed",
+			"detail": err.Error(),
+		}, err
+	}
+	cty := strings.TrimSpace(place.CtyName)
+	town := strings.TrimSpace(place.TownName)
+	sect := strings.TrimSpace(place.SectName)
+	vil := strings.TrimSpace(place.VillageName)
+	line := strings.TrimSpace(cty + town + sect + vil)
+	preferredCity = inferTaipeiMetroFromCountyCityZh(cty)
+	if line == "" {
+		return preferredCity, map[string]interface{}{
+			"source": "nlsc_town_village",
+			"error":  "empty_result",
+		}, nil
+	}
+	return preferredCity, map[string]interface{}{
+		"source":        "nlsc_town_village",
+		"county_city":   cty,
+		"town_district": town,
+		"sect":          sect,
+		"village":       vil,
+		"admin_line":    line,
+	}, nil
 }

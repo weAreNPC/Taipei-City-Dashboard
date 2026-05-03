@@ -33,8 +33,8 @@ func New(apiKey, baseURL, model string, timeout int) *TWCC {
 		BaseURL:    baseURL,
 		ModelName:  model,
 		HTTPClient: &http.Client{Timeout: time.Duration(timeout) * time.Second},
-		Temperature: 0.7,
-		MaxTokens:   350,
+		Temperature: 0.01,
+		MaxTokens:   512,
 	}
 }
 

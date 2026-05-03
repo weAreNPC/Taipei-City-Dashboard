@@ -23,7 +23,6 @@ func init() {
 	Register("resolve_coordinates_zh", ResolveCoordinatesZh)
 	Register("resolve_navigation_target", ResolveNavigationTarget)
 	Register("get_current_ui_context", GetCurrentUIContext)
-	Register("open_map_layer", OpenMapLayer)
 }
 
 // Register adds a tool to the registry
